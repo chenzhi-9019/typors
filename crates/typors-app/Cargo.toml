@@ -1,0 +1,23 @@
+[package]
+name = "typors-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+default-run = "typors"
+description = "typors - a hybrid Markdown editor (render projection + source block at the caret)"
+
+[dependencies]
+libloading = "0.8.9"
+typors-core = { path = "../typors-core" }
+
+[build-dependencies]
+winresource = "0.1.23"
+
+[[bin]]
+name = "typors"
+path = "src/main.rs"
+
+[[bin]]
+name = "dump"
+path = "src/bin/dump.rs"

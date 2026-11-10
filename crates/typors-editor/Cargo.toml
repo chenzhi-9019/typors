@@ -1,0 +1,14 @@
+[package]
+name = "typors-editor"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "typors editor: self-drawn GPUI element, input, IME and selection"
+
+[dependencies]
+gpui-fps.workspace = true
+gpui-kit.workspace = true
+typors-core = { path = "../typors-core" }
+typors-media = { path = "../typors-media" }
+typors-render = { path = "../typors-render" }

@@ -1,0 +1,23 @@
+[package]
+name = "typors-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "typors runtime DLL: window, editor, probes and shell registration"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+gpui-fps.workspace = true
+gpui-kit.workspace = true
+typors-core = { path = "../typors-core" }
+typors-editor = { path = "../typors-editor" }
+typors-probes = { path = "../typors-probes" }
+typors-render = { path = "../typors-render" }
+winreg = "0.56.0"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+] }

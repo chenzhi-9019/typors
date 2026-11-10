@@ -1,0 +1,11 @@
+[package]
+name = "typors-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "typors document model, Markdown parsing and source/render mapping"
+
+[dependencies]
+pulldown-cmark.workspace = true
+ropey.workspace = true

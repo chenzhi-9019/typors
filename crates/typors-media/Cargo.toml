@@ -1,0 +1,13 @@
+[package]
+name = "typors-media"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "typors rich-content engines: image sources and RaTeX math typesetting"
+
+[dependencies]
+base64.workspace = true
+ratex-layout.workspace = true
+ratex-parser.workspace = true
+ratex-svg.workspace = true

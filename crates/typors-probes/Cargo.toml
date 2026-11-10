@@ -1,0 +1,13 @@
+[package]
+name = "typors-probes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "typors programmatic probes and frame-cost sweeps (--dump-*)"
+
+[dependencies]
+gpui-kit.workspace = true
+typors-core = { path = "../typors-core" }
+typors-render = { path = "../typors-render" }
+typors-editor = { path = "../typors-editor" }

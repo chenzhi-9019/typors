@@ -1,0 +1,11 @@
+[package]
+name = "typors-render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "typors render-projection geometry: blocks, fragments, hit testing and caches"
+
+[dependencies]
+gpui-kit.workspace = true
+typors-core = { path = "../typors-core" }

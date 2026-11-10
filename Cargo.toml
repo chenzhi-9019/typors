@@ -1,0 +1,48 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+version = "0.1.0"
+publish = false
+
+[workspace.dependencies]
+gpui-kit = "=0.8.0"
+gpui-fps = "=0.8.0"
+pulldown-cmark = "=0.13.5"
+ropey = "=2.0.0-beta.1"
+ratex-parser = "=0.1.15"
+ratex-layout = "=0.1.15"
+ratex-svg = { version = "=0.1.15", features = ["standalone", "embed-fonts"] }
+base64 = "=0.22.1"
+
+# Day-to-day development: this crate lightly optimised, dependencies fully
+# optimised. GPUI at opt-level 0 shapes text slowly enough to make performance
+# measurements meaningless, so dependencies get their own optimisation.
+[profile.dev]
+opt-level = 1
+debug = true
+debug-assertions = true
+overflow-checks = true
+incremental = true
+strip = "none"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+# Release: optimised, thin LTO, symbols stripped to keep the installer small.
+[profile.release]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+incremental = false
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+strip = "symbols"
+
+[profile.release.package."*"]
+opt-level = 3
