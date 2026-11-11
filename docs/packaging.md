@@ -31,7 +31,7 @@ README.md
 ```powershell
 pwsh packaging\build-nsis.ps1
 # or: pwsh packaging\build-nsis.ps1 -Version 0.2.0
-# -> packaging\dist\typors-1.0.0-setup.exe
+# -> packaging\dist\typors-1.0.1-setup.exe
 ```
 
 The script passes `/INPUTCHARSET UTF8` to `makensis` because the script and the
@@ -43,28 +43,31 @@ The installer intentionally does **not** preselect optional behaviour:
 
 | Page / section | Default |
 | --- | --- |
-| Install directory | `%LOCALAPPDATA%\Programs\typors`, editable |
+| Install scope (all users / just me) | **No default**; Next disabled until chosen |
+| Install directory | all users: `%PROGRAMFILES%\typors`; just me: `%LOCALAPPDATA%\Programs\typors`, editable |
 | typors core files | Required |
 | `.md` association | **Unchecked**; user must tick it |
 | Desktop shortcut | **Unchecked** |
 | Start-menu shortcut | **Unchecked** |
 | Finish page "run typors" | **Unchecked** |
 
-The association section runs `typors.exe --register`; the uninstaller runs
-`--unregister`. On Windows 10/11 the first-run prompt also opens *Default Apps*
-because only the user can confirm the `UserChoice` hash.
+All-users installation writes `HKLM\Software\typors` and registers the
+association under HKLM (`--register-all`); just-me writes HKCU (`--register`).
+The all-users path relaunches the installer elevated via `ExecShell "runas"`.
+Uninstall detects the scope from the machine key and elevates for all-users.
 
 ## Silent smoke test (used on this machine)
 
 ```powershell
 $dir = "$env:TEMP\typors-install-test"
-.\packaging\dist\typors-1.0.0-setup.exe /S /D=$dir
+.\packaging\dist\typors-1.0.1-setup.exe /S /SCOPE=me /D=$dir
 & "$dir\typors.exe" --dump-media "$dir\sample.md"
 & "$dir\uninstall.exe" /S
 ```
 
-A silent install selects only the required core section, so it does not touch
-file associations or shortcuts.
+Per-user silent installs do not prompt for UAC. A silent all-users install
+(`/SCOPE=all`, no `/D`) relaunches elevated and therefore needs UAC approval; it
+cannot be tested unattended.
 
 ## Uninstall
 

@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 
 use winreg::RegKey;
-use winreg::enums::HKEY_CURRENT_USER;
+use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     IDYES, MB_ICONQUESTION, MB_YESNO, MessageBoxW,
 };
@@ -18,11 +18,25 @@ const PROG_ID: &str = "typors.md";
 const APP_NAME: &str = "typors";
 const FIRST_RUN_VALUE: &str = "AssociationPrompted";
 
+/// Registration scope chosen by the installer: current user or every user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Scope {
+    User,
+    Machine,
+}
+
+fn root(scope: Scope) -> RegKey {
+    match scope {
+        Scope::User => RegKey::predef(HKEY_CURRENT_USER),
+        Scope::Machine => RegKey::predef(HKEY_LOCAL_MACHINE),
+    }
+}
+
 /// Register typors as a Markdown candidate handler and record that the first-run
 /// prompt has been dealt with.
-pub fn register(exe: &Path) -> std::io::Result<()> {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let classes = hkcu.create_subkey("Software\\Classes")?.0;
+pub fn register(exe: &Path, scope: Scope) -> std::io::Result<()> {
+    let root = root(scope);
+    let classes = root.create_subkey("Software\\Classes")?.0;
 
     let prog = classes.create_subkey(PROG_ID)?.0;
     prog.set_value("", &"Markdown Document")?;
@@ -48,7 +62,7 @@ pub fn register(exe: &Path) -> std::io::Result<()> {
         .0
         .set_value("", &format!("\"{}\" \"%1\"", exe.display()))?;
 
-    let capabilities = hkcu.create_subkey("Software\\typors\\Capabilities")?.0;
+    let capabilities = root.create_subkey("Software\\typors\\Capabilities")?.0;
     capabilities.set_value("ApplicationName", &"typors")?;
     capabilities.set_value("ApplicationDescription", &"typors Markdown editor")?;
     capabilities
@@ -56,19 +70,23 @@ pub fn register(exe: &Path) -> std::io::Result<()> {
         .0
         .set_value(".md", &PROG_ID)?;
 
-    hkcu.create_subkey("Software\\RegisteredApplications")?
+    root.create_subkey("Software\\RegisteredApplications")?
         .0
         .set_value(APP_NAME, &"Software\\typors\\Capabilities")?;
 
-    mark_first_run_done()?;
+    if scope == Scope::User {
+        mark_first_run_done()?;
+    }
     Ok(())
 }
 
-/// `--register` from the installer: register without prompting.
-pub fn register_from_cli(exe: &Path) -> bool {
-    match register(exe) {
+/// `--register` / `--register-all` from the installer: register without prompting.
+pub fn register_from_cli(exe: &Path, scope: Scope) -> bool {
+    match register(exe, scope) {
         Ok(()) => {
-            println!("typors: registered as a Markdown (.md) candidate handler");
+            println!(
+                "typors: registered as a Markdown (.md) candidate handler ({scope:?})"
+            );
             true
         }
         Err(error) => {
@@ -83,7 +101,9 @@ pub fn register_from_cli(exe: &Path) -> bool {
 pub fn maybe_register_on_first_run() {
     if std::env::args().any(|arg| {
         arg == "--register"
+            || arg == "--register-all"
             || arg == "--unregister"
+            || arg == "--unregister-all"
             || arg == "--no-associate"
             || arg.starts_with("--dump")
             || arg == "--fps"
@@ -102,7 +122,7 @@ pub fn maybe_register_on_first_run() {
     let answer = unsafe { ask_user() };
     if answer == IDYES {
         if let Ok(exe) = std::env::current_exe()
-            && register(&exe).is_ok()
+            && register(&exe, Scope::User).is_ok()
         {
             open_default_apps();
         }
@@ -150,10 +170,10 @@ fn open_default_apps() {
 }
 
 /// Remove the candidate registration. Used by the NSIS uninstaller via
-/// `typors.exe --unregister`.
-pub fn unregister() -> std::io::Result<()> {
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    let classes = hkcu.open_subkey("Software\\Classes")?;
+/// `typors.exe --unregister` / `--unregister-all`.
+pub fn unregister(scope: Scope) -> std::io::Result<()> {
+    let root = root(scope);
+    let classes = root.open_subkey("Software\\Classes")?;
     let _ = classes.delete_subkey_all(PROG_ID);
     let _ = classes.delete_subkey_all("Applications\\typors.exe");
     if let Ok(md) = classes.open_subkey(".md") {
@@ -165,9 +185,9 @@ pub fn unregister() -> std::io::Result<()> {
             let _ = open_with.delete_value(PROG_ID);
         }
     }
-    if let Ok(registered) = hkcu.open_subkey("Software\\RegisteredApplications") {
+    if let Ok(registered) = root.open_subkey("Software\\RegisteredApplications") {
         let _ = registered.delete_value(APP_NAME);
     }
-    let _ = hkcu.delete_subkey_all("Software\\typors");
+    let _ = root.delete_subkey_all("Software\\typors");
     Ok(())
 }

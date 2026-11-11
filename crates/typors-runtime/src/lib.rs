@@ -15,11 +15,28 @@ pub extern "C" fn typors_run() -> i32 {
     let args: Vec<String> = std::env::args().collect();
     let exe = std::env::current_exe().unwrap_or_default();
 
-    if args.iter().any(|arg| arg == "--register") {
-        return if associate::register_from_cli(&exe) { 0 } else { 1 };
+    if args.iter().any(|arg| arg == "--register" || arg == "--register-all") {
+        let scope = if args.iter().any(|arg| arg == "--register-all") {
+            associate::Scope::Machine
+        } else {
+            associate::Scope::User
+        };
+        return if associate::register_from_cli(&exe, scope) {
+            0
+        } else {
+            1
+        };
     }
-    if args.iter().any(|arg| arg == "--unregister") {
-        return match associate::unregister() {
+    if args
+        .iter()
+        .any(|arg| arg == "--unregister" || arg == "--unregister-all")
+    {
+        let scope = if args.iter().any(|arg| arg == "--unregister-all") {
+            associate::Scope::Machine
+        } else {
+            associate::Scope::User
+        };
+        return match associate::unregister(scope) {
             Ok(()) => 0,
             Err(error) => {
                 eprintln!("typors: cannot unregister Markdown handler: {error}");

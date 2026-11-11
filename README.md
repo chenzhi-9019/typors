@@ -101,12 +101,22 @@ typors.exe --unregister
 ```powershell
 cargo build --release --workspace
 pwsh packaging\build-nsis.ps1
-# -> packaging\dist\typors-1.0.0-setup.exe
+# -> packaging\dist\typors-1.0.1-setup.exe
 ```
 
-The installer's optional sections (file association, desktop shortcut, Start-menu
-shortcut) are **all unchecked**; the user chooses. The core files are the only
-required section, and the Finish page's "run" box is unchecked too.
+The installer's first choice is **install scope**: every user (Program Files +
+HKLM) or only the current user (`%LOCALAPPDATA%` + HKCU). There is no default:
+Next stays disabled until one radio button is picked. All optional sections (file
+association, desktop shortcut, Start-menu shortcut) are **unchecked**; the user
+chooses. The core files are the only required section, and the Finish page's
+"run" box is unchecked too.
+
+Silent installs must state the scope:
+
+```powershell
+typors-1.0.1-setup.exe /S /SCOPE=me /D=C:\path\to\typors
+typors-1.0.1-setup.exe /S /SCOPE=all   # triggers UAC
+```
 
 The old Inno Setup script (`packaging\typors.iss`) is kept only as history; NSIS
 is the supported path.
