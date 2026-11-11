@@ -159,6 +159,9 @@ Function .onInit
   ${ElseIf} $0 == "me"
     StrCpy $InstallScope "me"
   ${EndIf}
+  ${If} $Elevated == "1"
+    Call SetScopePaths
+  ${EndIf}
   ${If} ${Silent}
     ${If} $InstallScope == ""
       SetErrorLevel 2
