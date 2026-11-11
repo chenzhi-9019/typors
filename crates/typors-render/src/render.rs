@@ -488,6 +488,13 @@ impl MediaMeasures for NoMedia {
                 descent: if *display { px(12.) } else { px(5.) },
                 display: *display,
             },
+            ObjectKind::Diagram { .. } => ObjectMetrics {
+                width: px(480.),
+                height: px(240.),
+                ascent: px(180.),
+                descent: px(60.),
+                display: true,
+            },
         }
     }
 }
@@ -1616,6 +1623,7 @@ impl DocLayout {
                     ObjectKind::Image { .. } => "image",
                     ObjectKind::Math { display: true, .. } => "display-math",
                     ObjectKind::Math { display: false, .. } => "inline-math",
+                    ObjectKind::Diagram { .. } => "diagram",
                 };
                 out.push_str(&format!(
                     "        object {:>2} {:<12} @({:.1},{:.1}) {}x{} src={:?} display={}\n",
@@ -3604,6 +3612,13 @@ mod tests {
                     ascent: px(15.),
                     descent: px(5.),
                     display: false,
+                },
+                ObjectKind::Diagram { .. } => ObjectMetrics {
+                    width: px(480.),
+                    height: px(240.),
+                    ascent: px(180.),
+                    descent: px(60.),
+                    display: true,
                 },
             }
         }

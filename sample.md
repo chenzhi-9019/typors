@@ -24,7 +24,12 @@ fn main() {
 
 删除线：~~已废弃~~；行内 HTML：<b>粗体</b>、<i>斜体</i> 与 <code>代码</code>。<br>HTML 换行之后。
 
-富内容：图片、公式、表格与行内 HTML；mermaid 与块级 HTML 仍待实现。
+富内容：图片、公式、表格、行内 HTML 与原生 mermaid。
+
+```mermaid
+flowchart LR
+  A[写 Markdown] --> B[原生布局] --> C[矢量渲染]
+```
 
 | 列一 | 列二 |
 |---|---|

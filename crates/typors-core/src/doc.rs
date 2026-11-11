@@ -97,6 +97,8 @@ pub enum ObjectKind {
         /// `$$...$$` (true) versus `$...$` (false).
         display: bool,
     },
+    /// A fenced ```mermaid block, rendered natively.
+    Diagram { source: String },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -375,6 +377,14 @@ struct Covered {
     object: Option<ObjectKind>,
 }
 
+/// One fenced ```mermaid block being consumed. The whole fence becomes one
+/// display object; a parse/render failure falls back to the source text.
+#[derive(Clone, Debug)]
+struct DiagramCapture {
+    start: usize,
+    source: String,
+}
+
 /// One image link being consumed. The parser reports the complete
 /// `![alt](dest "title")` range on both `Start(Image)` and `End(Image)`, with the
 /// alt text nested in between.
@@ -415,6 +425,8 @@ struct Walk {
     cell_start: Option<usize>,
     /// Saved styles for the inline HTML tags currently open (`<b>`, `<i>`, ...).
     html_stack: Vec<Style>,
+    /// Current ```mermaid fence, if one is open.
+    diagram: Option<DiagramCapture>,
 }
 
 impl Walk {
@@ -532,7 +544,8 @@ fn inline_html_action(tag: &str, current: Style) -> InlineHtml {
     }
 }
 
-fn parse_blocks(text: &str) -> Vec<Block> {    let mut walk = Walk {
+fn parse_blocks(text: &str) -> Vec<Block> {
+    let mut walk = Walk {
         builders: Vec::new(),
         frames: Vec::new(),
         style: Style::PLAIN,
@@ -542,6 +555,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {    let mut walk = Walk {
         table: None,
         cell_start: None,
         html_stack: Vec::new(),
+        diagram: None,
     };
 
     for (event, range) in Parser::new_ext(
@@ -550,6 +564,26 @@ fn parse_blocks(text: &str) -> Vec<Block> {    let mut walk = Walk {
     )
     .into_offset_iter()
     {
+        // A fenced ```mermaid block is one display object: consume the code text
+        // and replace the whole fence with a placeholder on `End(CodeBlock)`.
+        if let Some(diagram) = &mut walk.diagram {
+            match event {
+                Event::Text(s) => diagram.source.push_str(&s),
+                Event::End(TagEnd::CodeBlock) => {
+                    let diagram = walk.diagram.take().expect("diagram is open");
+                    walk.push_object(
+                        diagram.start..range.end,
+                        ObjectKind::Diagram {
+                            source: diagram.source,
+                        },
+                        Style::PLAIN,
+                    );
+                    pop_frame(&mut walk.frames);
+                }
+                _ => {}
+            }
+            continue;
+        }
         // Inside `![alt](...)`, every nested event belongs to the image: the alt
         // text is accumulated, emphasis markers are dropped, and the whole thing
         // becomes one atomic object on `End(Image)`.
@@ -597,14 +631,26 @@ fn parse_blocks(text: &str) -> Vec<Block> {    let mut walk = Walk {
                     walk.open_block(BlockKind::Heading { level: level as u8 });
                 }
                 Tag::CodeBlock(kind) => {
-                    let kind = match kind {
-                        CodeBlockKind::Fenced(info) => BlockKind::FencedCode {
-                            info: info.to_string(),
-                        },
-                        CodeBlockKind::Indented => BlockKind::IndentedCode,
+                    let info = match &kind {
+                        CodeBlockKind::Fenced(info) => info.trim().to_string(),
+                        CodeBlockKind::Indented => String::new(),
                     };
-                    let idx = walk.open_block(kind);
-                    walk.builders[idx].fallback = Some(range.clone());
+                    if info.eq_ignore_ascii_case("mermaid") {
+                        walk.open_block(BlockKind::Paragraph);
+                        walk.diagram = Some(DiagramCapture {
+                            start: range.start,
+                            source: String::new(),
+                        });
+                    } else {
+                        let kind = match kind {
+                            CodeBlockKind::Fenced(info) => BlockKind::FencedCode {
+                                info: info.to_string(),
+                            },
+                            CodeBlockKind::Indented => BlockKind::IndentedCode,
+                        };
+                        let idx = walk.open_block(kind);
+                        walk.builders[idx].fallback = Some(range.clone());
+                    }
                 }
                 Tag::BlockQuote(_) => {
                     walk.open_block(BlockKind::BlockQuote);

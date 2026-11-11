@@ -70,8 +70,13 @@ and assert their checks. Exit code 0 means every check passed.
 - Strikethrough `~~...~~`.
 - Inline HTML subset: `<b>/<strong>`, `<i>/<em>`, `<code>/<kbd>/<samp>`,
   `<s>/<del>`, `<a>` and `<br>`.
-- **Not yet:** mermaid diagrams and block-level HTML (`<div>`, `<p>`, ...); these
-  need either a WebView or a native layout engine.
+- **Mermaid**: fenced ```` ```mermaid ```` blocks render natively through
+  [merman](https://github.com/Latias94/merman), a headless Rust Mermaid
+  implementation (no WebView, no Node). The build currently enables the flowchart
+  family; add more `diagram-*` features in `crates/typors-media/Cargo.toml` to
+  extend coverage.
+- **Not yet:** block-level HTML (`<div>`, `<p>`, ...), which needs an HTML/CSS
+  layout engine.
 
 ## First-run Markdown association
 
@@ -117,8 +122,8 @@ All are debug/probe hooks; none is needed to use the editor.
 ## Dependencies
 
 `gpui-kit 0.8.0` (pins `gpui-pre 0.3.9`), `gpui-fps 0.8.0`, `pulldown-cmark
-0.13.5`, `ropey 2.0.0-beta.1`, `ratex-* 0.1.15`, `base64 0.22.1`, `winreg
-0.56.0`. Versions are pinned in the workspace `Cargo.toml`.
+0.13.5`, `ropey 2.0.0-beta.1`, `ratex-* 0.1.15`, `merman 0.9.3`, `base64 0.22.1`,
+`winreg 0.56.0`. Versions are pinned in the workspace `Cargo.toml`.
 
 ## Relation to `spike/`
 

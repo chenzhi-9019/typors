@@ -8,12 +8,13 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use gpui_kit::gpui::{
     App, Image, ImageFormat, ImgResourceLoader, Pixels, RenderImage, Resource, Window, px,
 };
 use typors_core::doc::{Document, ObjectKind, SpanKind};
+use typors_media::mermaid::Diagram;
 use typors_media::{ImageRef, MathEngine, MathMetrics, classify};
 use typors_render::{MediaMeasures, ObjectMetrics};
 
@@ -50,6 +51,7 @@ pub enum ObjectPaint {
 pub struct MediaContext {
     math: MathEngine,
     images: HashMap<String, ImageState>,
+    diagrams: Mutex<HashMap<String, Result<Arc<Diagram>, String>>>,
     doc_dir: Option<PathBuf>,
     generation: u64,
 }
@@ -65,6 +67,7 @@ impl MediaContext {
         Self {
             math: MathEngine::new(),
             images: HashMap::new(),
+            diagrams: Mutex::new(HashMap::new()),
             doc_dir,
             generation: 0,
         }
@@ -80,6 +83,26 @@ impl MediaContext {
 
     pub fn math(&self) -> &MathEngine {
         &self.math
+    }
+
+    /// Render (and cache) a native Mermaid diagram.
+    pub fn diagram(&self, source: &str) -> Result<Arc<Diagram>, String> {
+        if let Ok(cache) = self.diagrams.lock()
+            && let Some(hit) = cache.get(source)
+        {
+            return hit.clone();
+        }
+        let rendered = typors_media::mermaid::render(source)
+            .map(Arc::new)
+            .map_err(|error| error.to_string());
+        if let Ok(mut cache) = self.diagrams.lock() {
+            // Keep the cache bounded; a document rarely has hundreds of diagrams.
+            if cache.len() > 64 {
+                cache.clear();
+            }
+            cache.insert(source.to_string(), rendered.clone());
+        }
+        rendered
     }
 
     pub fn image_state(&self, destination: &str) -> &ImageState {
@@ -148,6 +171,26 @@ impl MediaMeasures for MediaContext {
                     display: false,
                 },
                 _ => placeholder_image_metrics(),
+            },
+            ObjectKind::Diagram { source } => match self.diagram(source) {
+                Ok(diagram) => {
+                    let width = diagram.width.clamp(80., 1200.);
+                    let height = diagram.height.clamp(40., 1200.);
+                    ObjectMetrics {
+                        width: px(width),
+                        height: px(height),
+                        ascent: px(height * 0.75),
+                        descent: px(height * 0.25),
+                        display: true,
+                    }
+                }
+                Err(_) => ObjectMetrics {
+                    width: px(480.),
+                    height: px(240.),
+                    ascent: px(180.),
+                    descent: px(60.),
+                    display: true,
+                },
             },
         }
     }

@@ -74,7 +74,7 @@
 - [x] 9.2 GFM 表格基础渲染：`ENABLE_TABLES`、`BlockKind::Table` + `TableData` 单元格范围、网格线与行/列布局。验证：`--dump-layout sample.md` 的 `[ 23] Table` 有 4 个单元格片段、bounds 非零、A1–A5 PASS。
 - [x] 9.3 行内 HTML 安全子集：`<b>/<strong>/<i>/<em>/<code>/<s>/<a>/<br>` 映射到样式或换行，未知标签不破坏解析。验证：`sample.md` 的 `<b>粗体</b>`、`<i>斜体</i>`、`<br>` 正确显示；单元测试保持全绿。
 - [x] 9.4 输入抖动：滚动锚定，同一光标块 top 变化时补偿 scroll offset。验证：`cargo build` 通过；`--dump-edit`/`--dump-select` exit 0；实机输入待用户复核。
-- [ ] 9.5 mermaid：需要 webview 或原生 flowchart 子集，尚未实现。阻塞点：与 GPUI 自绘架构冲突，需确认方案。
+- [x] 9.5 mermaid：需要 webview 或原生 flowchart 子集，尚未实现。阻塞点：与 GPUI 自绘架构冲突，需确认方案。
 - [ ] 9.6 块级 HTML：当前 `<div>` 等块级标签仍按纯文本/代码块降级；行内子集已完成，块级渲染需要 HTML/CSS 布局能力。
 
 ## Workflow follow-up
@@ -88,5 +88,6 @@
 - [x] 10.1 `typors-runtime` cdylib + 145 KB `typors.exe` loader；资源（图标/示例图）改为外部文件。验证：release 产物 `typors.exe` 145 KB、`typors_runtime.dll` 16 MB；`--dump-media` 从安装目录运行 exit 0。
 - [x] 10.2 首次运行注册 `.md` 候选打开方式（HKCU ProgID + RegisteredApplications + 默认应用页），并提供 `--register` / `--unregister`。验证：`typors.exe --register` 后 `HKCU\Software\Classes\typors.md\shell\open\command` 存在；卸载器调用 `--unregister`。
 - [x] 10.3 NSIS 安装程序 `packaging/typors.nsi`，所有可选组件默认不勾选。验证：`packaging/dist/typors-0.1.0-setup.exe` 4.65 MB；静默安装到临时目录、运行 `--dump-media`、卸载均通过。
-- [x] 10.4 本机发布验证：release DLL + loader、全部 `--dump-*`、`cargo test --workspace` 85 passed。
-- [ ] 10.5 mermaid / 块级 HTML：仍需 WebView 或原生布局引擎，未实现。
+- [x] 10.4 本机发布验证：release DLL + loader、全部 `--dump-*`、`cargo test --workspace` 87 passed。
+- [x] 10.5 原生 mermaid：merman 0.9.3（headless Rust，flowchart 族）已接入；`--dump-media` 显示 diagram 572x61，M5 绘制命令通过。
+- [ ] 10.6 块级 HTML：仍需 HTML/CSS 布局引擎，未实现。

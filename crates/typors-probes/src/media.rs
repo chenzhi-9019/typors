@@ -22,6 +22,7 @@ pub fn media_probe(view: &MarkdownView) -> ProbeCapture {
     let mut ready_images = 0usize;
     let mut failed = 0usize;
     let mut math_ok = 0usize;
+    let mut diagrams = 0usize;
 
     for block in &layout.blocks {
         for object in &block.objects {
@@ -51,6 +52,16 @@ pub fn media_probe(view: &MarkdownView) -> ProbeCapture {
                     Err(error) => {
                         failed += 1;
                         format!("math error: {error}")
+                    }
+                },
+                ObjectKind::Diagram { source } => match view.media().diagram(source) {
+                    Ok(diagram) => {
+                        diagrams += 1;
+                        format!("diagram {:.0}x{:.0}", diagram.width, diagram.height)
+                    }
+                    Err(error) => {
+                        failed += 1;
+                        format!("mermaid error: {error}")
                     }
                 },
             };
@@ -164,8 +175,12 @@ pub fn media_probe(view: &MarkdownView) -> ProbeCapture {
     ));
     checks.push((
         "M5 every ready/typeset object produced a paint command".to_string(),
-        view.painted_objects() >= ready_images + math_ok,
-        format!("{} commands, {} expected", view.painted_objects(), ready_images + math_ok),
+        view.painted_objects() >= ready_images + math_ok + diagrams,
+        format!(
+            "{} commands, {} expected",
+            view.painted_objects(),
+            ready_images + math_ok + diagrams
+        ),
     ));
 
     finish(report, checks, failures)
@@ -176,6 +191,7 @@ fn kind_label(kind: &ObjectKind) -> &'static str {
         ObjectKind::Image { .. } => "image",
         ObjectKind::Math { display: true, .. } => "display-math",
         ObjectKind::Math { display: false, .. } => "inline-math",
+        ObjectKind::Diagram { .. } => "diagram",
     }
 }
 

@@ -11,6 +11,8 @@
 
 pub mod image;
 pub mod math;
+pub mod mermaid;
 
 pub use image::{ImageRef, classify};
 pub use math::{DEFAULT_CACHE_CAPACITY, MathEngine, MathError, MathMetrics};
+pub use mermaid::{Diagram, DiagramError, render as render_mermaid};
