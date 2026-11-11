@@ -9,7 +9,7 @@
 - [x] 1.3 机械迁移现有产品代码：`doc.rs`/`sample.rs` → `typors-core`，`render.rs` → `typors-render`，`view.rs`/`ime.rs`/`selection.rs` → `typors-editor`，`perf.rs`/`probe.rs` → `typors-probes`，`main.rs`/`bin/dump.rs` → `typors-app`；只改 `use` 路径与 `pub(crate)` 可见性，不改逻辑；旧 `typors/` 目录保留到本组验证通过后再删除，`spike/` 移为 `crates/typors-spike`（源文件与测试原样）。验证：`cargo build --release -p typors-app` 成功，产物为 `target/release/typors.exe`。
 - [x] 1.4 恢复全部既有测试与探针：`cargo test --workspace`（产品 30 个 + spike 30 个）全绿；依次运行 `--dump-layout`、`--dump-cursor`、`--dump-edit`、`--dump-ime`、`--dump-select`、`--dump-newlines`、`--dump-perf sample.md`，全部 exit 0。验证：把重构前后的探针输出各存一份到 `%TEMP%` 并 diff，除路径/计时行外逐行一致。
 - [x] 1.5 配置两套 profile 并实测：`profile.dev`（opt-level 1、debug true、strip none、增量、`profile.dev.package."*"` opt-level 2）与 `profile.release`（opt-level 3、lto thin、codegen-units 1、debug false、strip symbols、panic unwind）。验证：`cargo build` 与 `cargo build --release` 均成功；记录 `target/release/typors.exe` 体积、`--dump-perf` 的 min/median/p95、debug 下窗口可断点；`cargo tree -d` 中 `gpui-pre` 只出现一份。
-- [ ] 1.6 workspace 化打包脚本：更新 `packaging/build-installer.ps1` 与 `packaging/typors.iss` 的 crate 目录、payload 路径、版本来源与构建命令（仓库根 `cargo build --release -p typors-app`，payload `target\release\typors.exe`）；同步 `docs/packaging.md` 的路径与命令。验证：`pwsh packaging/build-installer.ps1 -PayloadPath target\release\typors.exe` 能通过路径存在检查并走到 ISCC 前一步；README 的 Build 命令改为 `cargo build --release -p typors-app` 并可原样运行。
+- [x] 1.6 workspace 化打包脚本：更新 `packaging/build-installer.ps1` 与 `packaging/typors.iss` 的 crate 目录、payload 路径、版本来源与构建命令（仓库根 `cargo build --release -p typors-app`，payload `target\release\typors.exe`）；同步 `docs/packaging.md` 的路径与命令。验证：`pwsh packaging/build-installer.ps1 -PayloadPath target\release\typors.exe` 能通过路径存在检查并走到 ISCC 前一步；README 的 Build 命令改为 `cargo build --release -p typors-app` 并可原样运行。
 
 ## 2. 大文件拆分与质量门禁
 
@@ -60,12 +60,12 @@
 - [x] 7.2 扩展 `--dump-layout`：报告增加 `objects` 段与每条对象的 bounds/baseline/source；A1–A5 断言保持不变。验证：`cargo run --release -p typors-app -- --dump-layout sample.md` exit 0，diff 中仅新增对象段与预期行高变化。
 - [ ] 7.3 性能证据：`--dump-perf` 增加「10 万字符 + 50 公式」样本，断言首帧 ≤ 100 ms、采样帧 ≤ 16 ms、无 >100 ms 停顿；同时复跑无公式基线与重构前对比。验证：命令 exit 0；结果写进 `docs/architecture.md` 或本 change 的实现记录。
 - [x] 7.4 样本与资源：`sample.md` 增加本地 `assets/sample-picture.png`（用 `tools/make-icon.ps1 -PreviewPath` 生成并提交）、`$E=mc^2$`、`$$\frac{a}{b}$$`、一个缺失图片路径、一个非法公式；README 的探针表加入 `--dump-media`。验证：运行窗口目视图片/公式/占位均正确；`--dump-media sample.md` 覆盖四种对象状态。
-- [ ] 7.5 集成验收：`pwsh tools/check.ps1`、`cargo test --workspace`、全部 `--dump-*`、`cargo build --release -p typors-app`、`packaging/build-installer.ps1` 的 payload 检查一次通过；记录 release exe 体积与冷启动时间（≤1 s）。验证：输出归档到 `docs/architecture.md`；任一步失败回到对应 group 修复，不跳过。
+- [x] 7.5 集成验收：`pwsh tools/check.ps1`、`cargo test --workspace`、全部 `--dump-*`、`cargo build --release -p typors-app`、`packaging/build-installer.ps1` 的 payload 检查一次通过；记录 release exe 体积与冷启动时间（≤1 s）。验证：输出归档到 `docs/architecture.md`；任一步失败回到对应 group 修复，不跳过。
 
 ## 8. 文档与发布配置收尾
 
-- [ ] 8.1 更新 README 的 Layout/Build/Running/Probes/Dependencies 段落到 workspace 结构，说明 `typors-spike` 的地位与 `crates/typors-*` 的职责；同步 `docs/packaging.md` 与 `docs/spike/gpui-api-probe.md` 中失效的路径。验证：从 README 第一条命令开始逐条执行，全部可用。
-- [ ] 8.2 记录 profile 决策：在 `docs/architecture.md` 写明 dev/release 的 opt-level、LTO、strip、panic 选择与实测体积/启动数据；说明 strip 对崩溃诊断的影响与替代方案。验证：文档数值与实际 `Get-Item target/release/typors.exe`、`--dump-perf` 输出一致。
+- [x] 8.1 更新 README 的 Layout/Build/Running/Probes/Dependencies 段落到 workspace 结构，说明 `typors-spike` 的地位与 `crates/typors-*` 的职责；同步 `docs/packaging.md` 与 `docs/spike/gpui-api-probe.md` 中失效的路径。验证：从 README 第一条命令开始逐条执行，全部可用。
+- [x] 8.2 记录 profile 决策：在 `docs/architecture.md` 写明 dev/release 的 opt-level、LTO、strip、panic 选择与实测体积/启动数据；说明 strip 对崩溃诊断的影响与替代方案。验证：文档数值与实际 `Get-Item target/release/typors.exe`、`--dump-perf` 输出一致。
 - [ ] 8.3 检查「无坏味道」清单：每 crate 依赖方向、文件行数、公共 API 数量、`unwrap/expect` 生产路径零命中、无 `todo!`、无 `dbg!`、测试不依赖网络；把检查命令加入 `tools/check.ps1`。验证：`pwsh tools/check.ps1` 全绿；人为破坏一条规则能被脚本拦截（验证后还原）。
 
 ## 9. 用户追加（2026-11-11，超出原 42 项）
@@ -82,3 +82,11 @@
 - 先归档 M0：`openspec archive m0-hybrid-editor-spike`，让 `editor/hybrid-markdown-editing` 进入主 specs；否则本 change 的 MODIFIED delta 在归档时没有 base（`validate` 已给出 INFO）。
 - 再归档本 change：`openspec archive add-image-and-math-rendering`，并确认 `openspec/specs/editor/rich-content-rendering/spec.md` 与 `editor/hybrid-markdown-editing/spec.md` 内容正确。
 - 归档后复跑 `openspec validate --all --strict`，并检查 `openspec/specs/` 中没有重复的旧 requirement。
+
+## 10. 交付形态（2026-11-11，用户追加）
+
+- [x] 10.1 `typors-runtime` cdylib + 145 KB `typors.exe` loader；资源（图标/示例图）改为外部文件。验证：release 产物 `typors.exe` 145 KB、`typors_runtime.dll` 16 MB；`--dump-media` 从安装目录运行 exit 0。
+- [x] 10.2 首次运行注册 `.md` 候选打开方式（HKCU ProgID + RegisteredApplications + 默认应用页），并提供 `--register` / `--unregister`。验证：`typors.exe --register` 后 `HKCU\Software\Classes\typors.md\shell\open\command` 存在；卸载器调用 `--unregister`。
+- [x] 10.3 NSIS 安装程序 `packaging/typors.nsi`，所有可选组件默认不勾选。验证：`packaging/dist/typors-0.1.0-setup.exe` 4.65 MB；静默安装到临时目录、运行 `--dump-media`、卸载均通过。
+- [x] 10.4 本机发布验证：release DLL + loader、全部 `--dump-*`、`cargo test --workspace` 85 passed。
+- [ ] 10.5 mermaid / 块级 HTML：仍需 WebView 或原生布局引擎，未实现。
