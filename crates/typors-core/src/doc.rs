@@ -50,10 +50,17 @@ impl Style {
 /// What kind of block a source range is.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum BlockKind {
-    Heading { level: u8 },
+    Heading {
+        level: u8,
+    },
     Paragraph,
-    ListItem { ordered: bool, level: usize },
-    FencedCode { info: String },
+    ListItem {
+        ordered: bool,
+        level: usize,
+    },
+    FencedCode {
+        info: String,
+    },
     IndentedCode,
     BlockQuote,
     Rule,
@@ -99,6 +106,8 @@ pub enum ObjectKind {
     },
     /// A fenced ```mermaid block, rendered natively.
     Diagram { source: String },
+    /// A fenced ```chart block, rendered natively.
+    Chart { source: String },
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -247,6 +256,63 @@ impl Document {
         Some(idx.min(self.blocks.len() - 1))
     }
 
+    /// True when this byte belongs to a zero-width Markdown marker. Such bytes
+    /// deliberately collapse onto one visible position, so source round-tripping
+    /// is many-to-one there.
+    pub fn is_marker_byte(&self, src: usize) -> bool {
+        let Some(idx) = self.block_at_src(src) else {
+            return false;
+        };
+        self.blocks[idx]
+            .spans
+            .iter()
+            .any(|span| matches!(span.kind, SpanKind::Marker(_)) && span.src.contains(&src))
+    }
+
+    /// True when the caret is on or immediately next to an inline delimiter
+    /// (`**`, `*`, `` ` ``, link brackets). Typora reveals those delimiters only
+    /// at the caret, so the block temporarily uses the source projection.
+    pub fn caret_touches_inline_marker(&self, caret: usize) -> bool {
+        let Some(idx) = self.block_at_src(caret) else {
+            return false;
+        };
+        let block = &self.blocks[idx];
+        block.spans.iter().any(|span| {
+            let inline = matches!(
+                span.kind,
+                SpanKind::Marker(
+                    MarkerKind::EmphasisDelim
+                        | MarkerKind::InlineCodeDelim
+                        | MarkerKind::LinkSyntax
+                )
+            );
+            if !inline {
+                return false;
+            }
+            let start = span.src.start;
+            let end = span.src.end;
+            caret == start
+                || caret == end
+                || caret == self.snap_floor(start.saturating_sub(1))
+                || caret == self.snap_floor(end.saturating_add(1))
+        })
+    }
+
+    /// True when this block is an atomic chart/Mermaid fence. Those are the only
+    /// blocks that keep their Markdown source visible while the caret is inside;
+    /// every other block uses the Typora live-preview rendered projection.
+    pub fn block_is_rich_fence(&self, idx: usize) -> bool {
+        self.blocks.get(idx).is_some_and(|block| {
+            block.spans.iter().any(|span| {
+                matches!(
+                    span.kind,
+                    SpanKind::Object(ObjectKind::Diagram { .. })
+                        | SpanKind::Object(ObjectKind::Chart { .. })
+                )
+            })
+        })
+    }
+
     // ------------------------------------------------------------ mapping
 
     /// Source offset -> render position. Total: it never fails, and the result
@@ -273,6 +339,12 @@ impl Document {
     /// in this document; otherwise the offset is snapped down to a char boundary.
     pub fn render_to_src(&self, pos: &RenderPos) -> Option<usize> {
         let block = self.blocks.get(pos.block_idx)?;
+        if block.spans.is_empty() {
+            return (block.src.start == block.src.end
+                && pos.inline_idx == 0
+                && pos.offset_in_inline == 0)
+                .then_some(block.src.start);
+        }
         let span = block.spans.get(pos.inline_idx)?;
         if pos.offset_in_inline > span.src.len() {
             return None;
@@ -288,6 +360,9 @@ impl Document {
         let src = self.snap_floor(src);
         let block_idx = self.block_at_src(src)?;
         let block = &self.blocks[block_idx];
+        if block.spans.is_empty() {
+            return Some((block_idx, 0));
+        }
         let (i, off) = locate(block, src);
         let span = &block.spans[i];
         let render_byte = match span.kind {
@@ -313,7 +388,8 @@ impl Document {
         let mut best: Option<usize> = None;
         for span in &block.spans {
             let candidate = match span.kind {
-                SpanKind::Text => (span.render.start <= render_byte && render_byte < span.render.end)
+                SpanKind::Text => (span.render.start <= render_byte
+                    && render_byte < span.render.end)
                     .then(|| span.src.start + (render_byte - span.render.start)),
                 SpanKind::Degraded => {
                     let hit = span.render.start <= render_byte && render_byte <= span.render.end;
@@ -325,9 +401,7 @@ impl Document {
                 SpanKind::Marker(_) => (span.render.start == render_byte).then_some(span.src.start),
                 // An object is atomic in the visible projection: every source
                 // offset inside it collapses onto the placeholder's first byte.
-                SpanKind::Object(_) => {
-                    (span.render.start == render_byte).then_some(span.src.start)
-                }
+                SpanKind::Object(_) => (span.render.start == render_byte).then_some(span.src.start),
             };
             if let Some(c) = candidate {
                 best = Some(best.map_or(c, |b: usize| b.min(c)));
@@ -427,6 +501,8 @@ struct Walk {
     html_stack: Vec<Style>,
     /// Current ```mermaid fence, if one is open.
     diagram: Option<DiagramCapture>,
+    /// Current ```chart fence, if one is open.
+    chart: Option<DiagramCapture>,
 }
 
 impl Walk {
@@ -539,7 +615,8 @@ impl Walk {
                 let closing = lower.starts_with("</");
                 if lower.starts_with("<script") || lower.starts_with("<style") {
                     skip_depth += 1;
-                } else if closing && (lower.starts_with("</script") || lower.starts_with("</style")) {
+                } else if closing && (lower.starts_with("</script") || lower.starts_with("</style"))
+                {
                     skip_depth = skip_depth.saturating_sub(1);
                 } else if skip_depth == 0 {
                     if closing {
@@ -689,6 +766,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {
         cell_start: None,
         html_stack: Vec::new(),
         diagram: None,
+        chart: None,
     };
 
     for (event, range) in Parser::new_ext(
@@ -697,6 +775,25 @@ fn parse_blocks(text: &str) -> Vec<Block> {
     )
     .into_offset_iter()
     {
+        // A fenced ```chart block is one display object.
+        if let Some(chart) = &mut walk.chart {
+            match event {
+                Event::Text(s) => chart.source.push_str(&s),
+                Event::End(TagEnd::CodeBlock) => {
+                    let chart = walk.chart.take().expect("chart is open");
+                    walk.push_object(
+                        chart.start..range.end,
+                        ObjectKind::Chart {
+                            source: chart.source,
+                        },
+                        Style::PLAIN,
+                    );
+                    pop_frame(&mut walk.frames);
+                }
+                _ => {}
+            }
+            continue;
+        }
         // A fenced ```mermaid block is one display object: consume the code text
         // and replace the whole fence with a placeholder on `End(CodeBlock)`.
         if let Some(diagram) = &mut walk.diagram {
@@ -774,6 +871,12 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                             start: range.start,
                             source: String::new(),
                         });
+                    } else if info.eq_ignore_ascii_case("chart") {
+                        walk.open_block(BlockKind::Paragraph);
+                        walk.chart = Some(DiagramCapture {
+                            start: range.start,
+                            source: String::new(),
+                        });
                     } else {
                         let kind = match kind {
                             CodeBlockKind::Fenced(info) => BlockKind::FencedCode {
@@ -816,15 +919,33 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                 }
                 Tag::Strong => {
                     let saved = walk.style;
-                    walk.push_style(saved, Style { bold: true, ..saved });
+                    walk.push_style(
+                        saved,
+                        Style {
+                            bold: true,
+                            ..saved
+                        },
+                    );
                 }
                 Tag::Strikethrough => {
                     let saved = walk.style;
-                    walk.push_style(saved, Style { strike: true, ..saved });
+                    walk.push_style(
+                        saved,
+                        Style {
+                            strike: true,
+                            ..saved
+                        },
+                    );
                 }
                 Tag::Link { .. } => {
                     let saved = walk.style;
-                    walk.push_style(saved, Style { link: true, ..saved });
+                    walk.push_style(
+                        saved,
+                        Style {
+                            link: true,
+                            ..saved
+                        },
+                    );
                 }
                 Tag::Image {
                     dest_url, title, ..
@@ -1015,7 +1136,66 @@ fn finalize(text: &str, builders: Vec<Builder>) -> Vec<Block> {
     if cursor < text.len() {
         blocks.push(gap_block(text, cursor..text.len()));
     }
+    if blocks.is_empty() {
+        // A blank document is still an editable document: one zero-length
+        // paragraph gives the caret, hit testing and layout a block to own the
+        // first line. `render_to_src` special-cases this block (it has no spans).
+        blocks.push(Block {
+            kind: BlockKind::Paragraph,
+            src: 0..0,
+            render: String::new(),
+            spans: Vec::new(),
+            table: None,
+        });
+    }
+    expand_toc(text, &mut blocks);
     blocks
+}
+
+/// `[toc]` is expanded into a static outline of every heading. The block still
+/// maps to its five source bytes, so editing the marker is a normal edit; the
+/// generated lines are presentation only.
+fn expand_toc(text: &str, blocks: &mut [Block]) {
+    let Some(toc_idx) = blocks.iter().position(|block| {
+        block.kind == BlockKind::Paragraph
+            && text
+                .get(block.src.clone())
+                .is_some_and(|slice| slice.trim().eq_ignore_ascii_case("[toc]"))
+    }) else {
+        return;
+    };
+    let entries: Vec<(u8, String)> = blocks
+        .iter()
+        .filter_map(|block| match block.kind {
+            BlockKind::Heading { level } => Some((level, block.render.clone())),
+            _ => None,
+        })
+        .collect();
+    let mut rendered = String::new();
+    if entries.is_empty() {
+        rendered.push_str("（暂无标题）");
+    } else {
+        for (index, (level, title)) in entries.iter().enumerate() {
+            if index > 0 {
+                rendered.push('\n');
+            }
+            rendered.push_str(&"  ".repeat((*level as usize).saturating_sub(1)));
+            rendered.push_str("• ");
+            rendered.push_str(title);
+        }
+    }
+    let block = &mut blocks[toc_idx];
+    block.kind = BlockKind::Paragraph;
+    block.render = rendered.clone();
+    block.spans = vec![Span {
+        src: block.src.clone(),
+        render: 0..rendered.len(),
+        kind: SpanKind::Text,
+        style: Style {
+            link: true,
+            ..Style::PLAIN
+        },
+    }];
 }
 
 fn build_block(
@@ -1260,9 +1440,11 @@ mod tests {
         let text = "- 第一项\n- 第二项\n";
         let bs = blocks(text);
         assert_eq!(bs.len(), 2, "list: {bs:?}");
-        assert!(bs
-            .iter()
-            .all(|b| b.kind == BlockKind::ListItem { ordered: false, level: 0 }));
+        assert!(bs.iter().all(|b| b.kind
+            == BlockKind::ListItem {
+                ordered: false,
+                level: 0
+            }));
         assert_eq!(bs[0].src, 0..first_line.len());
         assert_eq!(bs[1].src, first_line.len()..text.len());
         assert_eq!(bs[0].render, "第一项");
@@ -1272,9 +1454,11 @@ mod tests {
         let text = "1. 一\n2. 二\n";
         let bs = blocks(text);
         assert_eq!(bs.len(), 2, "ordered list: {bs:?}");
-        assert!(bs
-            .iter()
-            .all(|b| b.kind == BlockKind::ListItem { ordered: true, level: 0 }));
+        assert!(bs.iter().all(|b| b.kind
+            == BlockKind::ListItem {
+                ordered: true,
+                level: 0
+            }));
         assert_eq!(bs[1].render, "二");
     }
 
@@ -1294,6 +1478,14 @@ mod tests {
             for block in doc.blocks() {
                 assert_eq!(block.src.start, cursor, "block gap in {text:?}");
                 cursor = block.src.end;
+                if block.src.start == block.src.end {
+                    // Only the synthetic zero-length paragraph of an empty
+                    // document is allowed to be empty.
+                    assert_eq!(text, "");
+                    assert_eq!(doc.blocks().len(), 1);
+                    assert!(block.spans.is_empty());
+                    continue;
+                }
                 assert!(block.src.start < block.src.end);
 
                 let mut span_cursor = block.src.start;
@@ -1307,10 +1499,9 @@ mod tests {
                     render_cursor = span.render.end;
                     render.push_str(&block.render[span.render.clone()]);
                     match span.kind {
-                        SpanKind::Text => assert_eq!(
-                            &text[span.src.clone()],
-                            &block.render[span.render.clone()]
-                        ),
+                        SpanKind::Text => {
+                            assert_eq!(&text[span.src.clone()], &block.render[span.render.clone()])
+                        }
                         SpanKind::Marker(_) => assert_eq!(span.render.start, span.render.end),
                         SpanKind::Degraded => {}
                         SpanKind::Object(_) => {
@@ -1323,7 +1514,11 @@ mod tests {
                 assert_eq!(render_cursor, block.render.len());
                 assert_eq!(render, block.render);
             }
-            assert_eq!(cursor, text.len(), "blocks do not reach the end of {text:?}");
+            assert_eq!(
+                cursor,
+                text.len(),
+                "blocks do not reach the end of {text:?}"
+            );
         }
     }
 
@@ -1362,8 +1557,14 @@ mod tests {
                 assert_eq!(span.src.start + pos.offset_in_inline, expected);
             }
         }
-        println!("roundtrip checked {checked} source offsets across {} samples", samples.len());
-        assert!(checked > 20_000, "sample corpus is too small: {checked} offsets");
+        println!(
+            "roundtrip checked {checked} source offsets across {} samples",
+            samples.len()
+        );
+        assert!(
+            checked > 20_000,
+            "sample corpus is too small: {checked} offsets"
+        );
     }
 
     /// 2.2 — the reverse of the visible projection is the canonical smallest
@@ -1459,7 +1660,11 @@ mod tests {
         assert!(!rendered.contains('<'), "tags survived: {rendered:?}");
         for s in 0..=doc.len_bytes() {
             let pos = doc.src_to_render(s);
-            assert_eq!(doc.render_to_src(&pos), Some(doc.snap_floor(s)), "offset {s}");
+            assert_eq!(
+                doc.render_to_src(&pos),
+                Some(doc.snap_floor(s)),
+                "offset {s}"
+            );
         }
     }
 
@@ -1477,12 +1682,20 @@ mod tests {
                     destination,
                     title,
                     alt,
-                }) => Some((s.src.clone(), destination.clone(), title.clone(), alt.clone())),
+                }) => Some((
+                    s.src.clone(),
+                    destination.clone(),
+                    title.clone(),
+                    alt.clone(),
+                )),
                 _ => None,
             })
             .collect();
         assert_eq!(objects.len(), 1, "{objects:?}");
-        assert_eq!(&text[objects[0].0.clone()], "![alt *em*](<my image.png> \"标题\")");
+        assert_eq!(
+            &text[objects[0].0.clone()],
+            "![alt *em*](<my image.png> \"标题\")"
+        );
         assert_eq!(objects[0].1, "my image.png");
         assert_eq!(objects[0].2, "标题");
         assert_eq!(objects[0].3, "alt em");
@@ -1633,6 +1846,48 @@ mod tests {
         }
         doc.apply_edit(0..2, "");
         assert_eq!(doc.text(), "# 标题\n\n正文**粗体**\n");
+    }
+
+    /// A blank document is still editable: one zero-length paragraph owns offset
+    /// 0, and the mapping round-trips through that block.
+    #[test]
+    fn empty_document_has_one_editable_block() {
+        let doc = Document::parse("");
+        assert_eq!(doc.blocks().len(), 1);
+        assert_eq!(doc.blocks()[0].src, 0..0);
+        assert_eq!(doc.block_at_src(0), Some(0));
+        let pos = doc.src_to_render(0);
+        assert_eq!(pos.block_idx, 0);
+        assert_eq!(pos.inline_idx, 0);
+        assert_eq!(pos.offset_in_inline, 0);
+        assert_eq!(doc.render_to_src(&pos), Some(0));
+        assert_eq!(doc.text(), "");
+    }
+
+    #[test]
+    fn empty_document_roundtrips_through_edit() {
+        let mut doc = Document::parse("");
+        doc.apply_edit(0..0, "x");
+        assert_eq!(doc.text(), "x");
+        assert!(!doc.blocks().is_empty());
+        doc.apply_edit(0..1, "");
+        assert_eq!(doc.text(), "");
+        assert_eq!(doc.blocks().len(), 1);
+        assert_eq!(doc.blocks()[0].src, 0..0);
+        assert_eq!(doc.block_at_src(0), Some(0));
+    }
+
+    #[test]
+    fn toc_marker_expands_to_heading_outline() {
+        let doc = Document::parse("[toc]\n\n# 标题一\n\n## 标题二\n");
+        let toc = doc
+            .blocks()
+            .iter()
+            .find(|block| block.render.contains("标题一"))
+            .expect("toc block");
+        assert!(toc.render.contains("• 标题一"));
+        assert!(toc.render.contains("  • 标题二"));
+        assert!(toc.spans.iter().any(|span| span.style.link));
     }
 
     /// Degenerate documents must not panic.

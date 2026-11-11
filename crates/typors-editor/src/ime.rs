@@ -8,8 +8,7 @@
 //! be drawn at, and `bounds_for_range` can answer the platform in the same
 //! coordinate system the string is painted in.
 //!
-//! Two facts from the source-level probe drive every decision here
-//! (`docs/spike/gpui-api-probe.md` §3.4):
+//! Two facts from the original M0 source-level probe drive every decision here:
 //!
 //! * `WM_IME_ENDCOMPOSITION` is **not** handled by `gpui-pre-windows`, and
 //!   `unmark_text` / `marked_text_range` are never called on Windows. Nothing
@@ -40,10 +39,10 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use gpui_kit::gpui::*;
 
-use typors_core::doc::{Document, Style};
 use crate::capture::ProbeCapture;
+use crate::view::{MarkdownView, byte_to_utf16, utf16_to_byte};
+use typors_core::doc::{Document, Style};
 use typors_render::{BlockMode, DocLayout};
-use crate::view::{byte_to_utf16, utf16_to_byte, MarkdownView};
 
 pub use typors_core::MarkedText;
 
@@ -74,7 +73,10 @@ fn stamp() -> String {
 ///
 /// `TYPORS_IME_LOG=off` silences it.
 pub fn log_ime(event: &str, detail: std::fmt::Arguments<'_>) {
-    if matches!(std::env::var("TYPORS_IME_LOG").as_deref(), Ok("off") | Ok("0")) {
+    if matches!(
+        std::env::var("TYPORS_IME_LOG").as_deref(),
+        Ok("off") | Ok("0")
+    ) {
         return;
     }
     eprintln!("ime {} {event:<14} {detail}", stamp());
@@ -138,10 +140,7 @@ fn composite_pos(layout: &DocLayout, doc: &Document, composite: usize) -> Option
     let painted = block.painted_text();
     // A fragment that *starts* here wins over one that merely ends here: at a
     // fragment boundary both match, and the composition is the later one.
-    let exact = block
-        .spans
-        .iter()
-        .find(|s| s.render.start == display_byte);
+    let exact = block.spans.iter().find(|s| s.render.start == display_byte);
     let span = exact.or_else(|| {
         block
             .spans
@@ -251,14 +250,8 @@ pub fn ime_probe(
     // The document the window is painting. `element_bounds` the platform passes
     // in is a rectangle it computed itself; 6.2 forbids using it for the anchor,
     // so the probe hands in two very different ones and expects one answer.
-    let element_bounds = Bounds::new(
-        point(px(0.), px(0.)),
-        size(px(1472.), px(2400.)),
-    );
-    let bogus_element_bounds = Bounds::new(
-        point(px(411.), px(733.)),
-        size(px(90.), px(4000.)),
-    );
+    let element_bounds = Bounds::new(point(px(0.), px(0.)), size(px(1472.), px(2400.)));
+    let bogus_element_bounds = Bounds::new(point(px(411.), px(733.)), size(px(90.), px(4000.)));
 
     let paragraph = view.layout().and_then(|layout| {
         layout
@@ -300,7 +293,9 @@ pub fn ime_probe(
             match view.marked() {
                 Some(m) if m.text == "nihao" => detail.push_str(&format!(
                     "   composition buffer        {:?} at src {} ({} bytes)\n",
-                    m.text, m.anchor, m.len()
+                    m.text,
+                    m.anchor,
+                    m.len()
                 )),
                 other => failures.push(format!("composition buffer after start is {other:?}")),
             }
@@ -352,7 +347,9 @@ pub fn ime_probe(
                         ));
                     }
                 }
-                None => failures.push("no composite geometry for the composition start".to_string()),
+                None => {
+                    failures.push("no composite geometry for the composition start".to_string())
+                }
             }
 
             // 6.1 / candidate anchor: the rectangle the platform would hand to
@@ -415,9 +412,8 @@ pub fn ime_probe(
                             ));
                         }
                     }
-                    (None, _) => {
-                        failures.push("bounds_for_range returned nothing while composing".to_string())
-                    }
+                    (None, _) => failures
+                        .push("bounds_for_range returned nothing while composing".to_string()),
                     (_, None) => failures.push("no fragment at the queried caret".to_string()),
                 }
             } else {
@@ -455,7 +451,9 @@ pub fn ime_probe(
         }
         None => skipped = Some("no paragraph block with painted fragments".to_string()),
     }
-    report.push_str(&format!("\n-- I1/I2 composition start and update.\n{detail}"));
+    report.push_str(&format!(
+        "\n-- I1/I2 composition start and update.\n{detail}"
+    ));
     let name = "I1/I2 composition is displayed without touching the buffer, update replaces it";
     checks.push(match (skipped.take(), failures.is_empty()) {
         (Some(why), _) => not_exercised(name, &why),
@@ -485,10 +483,15 @@ pub fn ime_probe(
             // one edit, four characters, caret right behind them.
             view.replace_text_in_range(None, "你好世界", window, cx);
             view.sync_layout();
-            detail.push_str(&step_line(view, "3 commit 你好世界", "result=你好世界 range=none"));
+            detail.push_str(&step_line(
+                view,
+                "3 commit 你好世界",
+                "result=你好世界 range=none",
+            ));
             let expected = spliced(&before, anchor..anchor, "你好世界");
             if view.doc().text() != expected {
-                failures.push("commit did not insert the result at the composition anchor".to_string());
+                failures
+                    .push("commit did not insert the result at the composition anchor".to_string());
             }
             if view.doc().revision() != rev_before + 1 {
                 failures.push(format!(
@@ -497,7 +500,9 @@ pub fn ime_probe(
                 ));
             }
             if view.marked().is_some() {
-                failures.push("the composition survived the commit (no unmark_text on Windows)".to_string());
+                failures.push(
+                    "the composition survived the commit (no unmark_text on Windows)".to_string(),
+                );
             }
             let caret_expected = anchor + "你好世界".len();
             if view.caret() != Some(caret_expected) {
@@ -537,7 +542,10 @@ pub fn ime_probe(
                         ));
                     }
                     if pos.painted.contains("nih") {
-                        failures.push(format!("composition residue after commit: {:?}", pos.painted));
+                        failures.push(format!(
+                            "composition residue after commit: {:?}",
+                            pos.painted
+                        ));
                     }
                     if pos.block_idx != *p_idx {
                         failures.push(format!(
@@ -549,10 +557,20 @@ pub fn ime_probe(
                 None => failures.push("no geometry after commit".to_string()),
             }
             let sources = view.layout().map(source_blocks).unwrap_or_default();
-            if sources != vec![*p_idx] {
+            let committed_mode = view.layout().and_then(|l| l.block_mode(*p_idx));
+            let marker_source = view
+                .caret()
+                .is_some_and(|caret| view.doc().caret_touches_inline_marker(caret))
+                && sources == vec![*p_idx];
+            if !sources.is_empty() && !marker_source {
                 failures.push(format!(
-                    "source projection after commit is {sources:?}, expected [{p_idx}]"
+                    "source projection after commit is {sources:?}, expected none (live preview)"
                 ));
+            }
+            if committed_mode != Some(BlockMode::Rendered) && !marker_source {
+                failures.push(
+                    "the committed block did not return to the rendered projection".to_string(),
+                );
             }
             let rendered_siblings = view
                 .layout()
@@ -572,10 +590,7 @@ pub fn ime_probe(
             // carry their real advance, which is roughly twice the ASCII advance
             // of the same character count.
             let cjk_inputs = view.layout().map(|layout| {
-                let font_size = post
-                    .as_ref()
-                    .map(|p| p.span_font_size)
-                    .unwrap_or(px(17.));
+                let font_size = post.as_ref().map(|p| p.span_font_size).unwrap_or(px(17.));
                 let style = post.as_ref().map(|p| p.span_style).unwrap_or(Style::PLAIN);
                 (layout.metrics.clone(), font_size, style)
             });
@@ -610,7 +625,8 @@ pub fn ime_probe(
                             ));
                         }
                     }
-                    None => failures.push("bounds_for_range returned nothing for the CJK range".to_string()),
+                    None => failures
+                        .push("bounds_for_range returned nothing for the CJK range".to_string()),
                 }
             }
 
@@ -637,7 +653,8 @@ pub fn ime_probe(
             ));
             match (real, bogus) {
                 (Some(a), Some(b)) => {
-                    if !close(a.origin.x, b.origin.x, 0.01) || !close(a.origin.y, b.origin.y, 0.01) {
+                    if !close(a.origin.x, b.origin.x, 0.01) || !close(a.origin.y, b.origin.y, 0.01)
+                    {
                         failures.push(format!(
                             "element_bounds moved the candidate anchor: {} != {}",
                             fmt_bounds(Some(a)),
@@ -645,15 +662,17 @@ pub fn ime_probe(
                         ));
                     }
                 }
-                (None, _) | (_, None) => {
-                    failures.push("bounds_for_range returned nothing for the committed range".to_string())
-                }
+                (None, _) | (_, None) => failures
+                    .push("bounds_for_range returned nothing for the committed range".to_string()),
             }
         }
         None => skipped = Some("no paragraph block to commit into".to_string()),
     }
-    report.push_str(&format!("\n-- I3/I6 commit, CJK geometry and element_bounds.\n{detail}"));
-    let name = "I3/I6 commit inserts once at the anchor, CJK width is measured, element_bounds ignored";
+    report.push_str(&format!(
+        "\n-- I3/I6 commit, CJK geometry and element_bounds.\n{detail}"
+    ));
+    let name =
+        "I3/I6 commit inserts once at the anchor, CJK width is measured, element_bounds ignored";
     checks.push(match (skipped.take(), failures.is_empty()) {
         (Some(why), _) => not_exercised(name, &why),
         (None, true) => (
@@ -679,7 +698,8 @@ pub fn ime_probe(
             view.sync_layout();
             detail.push_str(&step_line(view, "4 start again nihao", "compstr=nihao"));
             if view.doc().text() != after_commit || view.doc().revision() != rev_before {
-                failures.push("composition before the cancel already changed the buffer".to_string());
+                failures
+                    .push("composition before the cancel already changed the buffer".to_string());
             }
             view.replace_text_in_range(None, "", window, cx);
             view.sync_layout();
@@ -713,7 +733,11 @@ pub fn ime_probe(
             view.replace_text_in_range(None, "abc ", window, cx);
             view.sync_layout();
             detail.push_str(&step_line(view, "5 ascii 'abc '", "chars=abc+space"));
-            let expected = spliced(&after_commit, caret_after_commit..caret_after_commit, "abc ");
+            let expected = spliced(
+                &after_commit,
+                caret_after_commit..caret_after_commit,
+                "abc ",
+            );
             if view.doc().text() != expected {
                 failures.push("'abc ' after the commit did not append cleanly".to_string());
             }
@@ -727,7 +751,8 @@ pub fn ime_probe(
             if view.doc().text().matches("你好世界").count() != 1 {
                 failures.push("the committed word was duplicated".to_string());
             }
-            if view.doc().text().contains("你好世界nihao") || view.doc().text().contains("niha") {
+            if view.doc().text().contains("你好世界nihao") || view.doc().text().contains("niha")
+            {
                 failures.push("composition residue in the buffer".to_string());
             }
             detail.push_str(&format!(
@@ -740,7 +765,9 @@ pub fn ime_probe(
         }
         _ => skipped = Some("no committed text to cancel or append after".to_string()),
     }
-    report.push_str(&format!("\n-- I4/I5 cancel and ASCII right after the commit.\n{detail}"));
+    report.push_str(&format!(
+        "\n-- I4/I5 cancel and ASCII right after the commit.\n{detail}"
+    ));
     let name = "I4/I5 cancel leaves the buffer byte-identical, ASCII after commit appends cleanly";
     checks.push(match (skipped.take(), failures.is_empty()) {
         (Some(why), _) => not_exercised(name, &why),
@@ -760,7 +787,9 @@ pub fn ime_probe(
         layout
             .blocks
             .iter()
-            .find(|b| matches!(b.kind, typors_core::doc::BlockKind::Heading { level } if level == 2))
+            .find(
+                |b| matches!(b.kind, typors_core::doc::BlockKind::Heading { level } if level == 2),
+            )
             .map(|b| (b.block_idx, b.src.clone(), b.line_height))
     });
     match (&paragraph, heading) {
@@ -781,10 +810,40 @@ pub fn ime_probe(
                 failures.push("the paragraph did not go back to the render projection".to_string());
             }
 
+            let expect_rendered = |step: &str,
+                                   failures: &mut Vec<String>,
+                                   view: &MarkdownView,
+                                   detail: &mut String| {
+                let sources = view.layout().map(source_blocks).unwrap_or_default();
+                let mode = view.layout().and_then(|l| l.block_mode(h_idx));
+                let painted = view
+                    .layout()
+                    .and_then(|l| l.blocks.iter().find(|b| b.block_idx == h_idx))
+                    .map(|b| b.painted_text())
+                    .unwrap_or_default();
+                detail.push_str(&format!(
+                    "   projection @ {step:<12} heading {:?} source blocks {sources:?} painted {:?}\n",
+                    mode,
+                    truncate(&painted, 46)
+                ));
+                if mode != Some(BlockMode::Rendered) {
+                    failures.push(format!("the heading left the render projection at {step}"));
+                }
+                if !sources.is_empty() {
+                    failures.push(format!(
+                        "source blocks at {step} are {sources:?}, expected none"
+                    ));
+                }
+                if painted.starts_with("## ") {
+                    failures.push(format!("markers are painted at {step}"));
+                }
+            };
+            expect_rendered("live preview", &mut failures, view, &mut detail);
+
             let expect_source = |step: &str,
-                                     failures: &mut Vec<String>,
-                                     view: &MarkdownView,
-                                     detail: &mut String| {
+                                 failures: &mut Vec<String>,
+                                 view: &MarkdownView,
+                                 detail: &mut String| {
                 let sources = view.layout().map(source_blocks).unwrap_or_default();
                 let mode = view.layout().and_then(|l| l.block_mode(h_idx));
                 let painted = view
@@ -801,24 +860,32 @@ pub fn ime_probe(
                     failures.push(format!("the heading left the source projection at {step}"));
                 }
                 if sources != vec![h_idx] {
-                    failures.push(format!("source blocks at {step} are {sources:?}, expected [{h_idx}]"));
+                    failures.push(format!(
+                        "source blocks at {step} are {sources:?}, expected [{h_idx}]"
+                    ));
                 }
                 if !painted.starts_with("## ") {
-                    failures.push(format!("markers are not painted during composition at {step}"));
+                    failures.push(format!(
+                        "markers are not painted during composition at {step}"
+                    ));
                 }
             };
-            expect_source("composition start", &mut failures, view, &mut detail);
 
             view.replace_and_mark_text_in_range(None, "biaoti", Some(0..6), window, cx);
             view.sync_layout();
-            detail.push_str(&step_line(view, "7 heading compstr", "compstr=biaoti sel=0..6"));
+            detail.push_str(&step_line(
+                view,
+                "7 heading compstr",
+                "compstr=biaoti sel=0..6",
+            ));
             expect_source("after start", &mut failures, view, &mut detail);
 
             // The 34.3 px heading line: the candidate anchor must sit on it, not
             // on a body line height.
             let sel = view.selected_text_range(false, window, cx);
             if let Some(sel) = sel
-                && let Some(bounds) = view.bounds_for_range(sel.range.clone(), element_bounds, window, cx)
+                && let Some(bounds) =
+                    view.bounds_for_range(sel.range.clone(), element_bounds, window, cx)
             {
                 detail.push_str(&format!(
                     "   heading anchor           bounds {} line height {:.1}\n",
@@ -844,13 +911,17 @@ pub fn ime_probe(
 
             view.replace_and_mark_text_in_range(None, "biaotilan", None, window, cx);
             view.sync_layout();
-            detail.push_str(&step_line(view, "7 heading update", "compstr=biaotilan sel=none"));
+            detail.push_str(&step_line(
+                view,
+                "7 heading update",
+                "compstr=biaotilan sel=none",
+            ));
             expect_source("after update", &mut failures, view, &mut detail);
 
             view.replace_text_in_range(None, "标题蓝", window, cx);
             view.sync_layout();
             detail.push_str(&step_line(view, "7 heading commit", "result=标题蓝"));
-            expect_source("after commit", &mut failures, view, &mut detail);
+            expect_rendered("after commit", &mut failures, view, &mut detail);
             if view.caret_block() != Some(h_idx) {
                 failures.push(format!(
                     "caret left the heading after commit: {:?}",
@@ -868,13 +939,17 @@ pub fn ime_probe(
                 after
             ));
             if after != Some(BlockMode::Rendered) {
-                failures.push(format!("the heading stayed in the source projection: {after:?}"));
+                failures.push(format!(
+                    "the heading stayed in the source projection: {after:?}"
+                ));
             }
         }
         (None, _) => skipped = Some("no paragraph block".to_string()),
         (_, None) => skipped = Some("no level-2 heading block".to_string()),
     }
-    report.push_str(&format!("\n-- I7 the caret block stays in the source projection while composing.\n{detail}"));
+    report.push_str(&format!(
+        "\n-- I7 the caret block stays in the source projection while composing.\n{detail}"
+    ));
     let name = "I7 a rendered heading block flips to source when composing and keeps it until the caret leaves";
     checks.push(match (skipped.take(), failures.is_empty()) {
         (Some(why), _) => not_exercised(name, &why),
@@ -897,7 +972,10 @@ pub fn ime_probe(
         layout
             .blocks
             .iter()
-            .find(|b| matches!(b.kind, typors_core::doc::BlockKind::ListItem { .. }) && !b.spans.is_empty())
+            .find(|b| {
+                matches!(b.kind, typors_core::doc::BlockKind::ListItem { .. })
+                    && !b.spans.is_empty()
+            })
             .map(|b| (b.block_idx, b.src.clone(), b.content_left, b.line_height))
     });
     match list_item {
@@ -910,17 +988,15 @@ pub fn ime_probe(
             view.replace_and_mark_text_in_range(None, "xie", Some(0..3), window, cx);
             view.sync_layout();
             detail.push_str(&step_line(view, "8 list item compstr", "compstr=xie"));
-            let bounds = view
-                .selected_text_range(false, window, cx)
-                .and_then(|sel| {
-                    let composite = view.marked().map(|m| m.splice(&view.doc().text(), 0).0)?;
-                    let queried = utf16_to_byte(&composite, sel.range.start);
-                    let bounds = view.bounds_for_range(sel.range.clone(), element_bounds, window, cx);
-                    let pos = view
-                        .layout()
-                        .and_then(|layout| composite_pos(layout, view.doc(), queried));
-                    Some((bounds, pos))
-                });
+            let bounds = view.selected_text_range(false, window, cx).and_then(|sel| {
+                let composite = view.marked().map(|m| m.splice(&view.doc().text(), 0).0)?;
+                let queried = utf16_to_byte(&composite, sel.range.start);
+                let bounds = view.bounds_for_range(sel.range.clone(), element_bounds, window, cx);
+                let pos = view
+                    .layout()
+                    .and_then(|layout| composite_pos(layout, view.doc(), queried));
+                Some((bounds, pos))
+            });
             match bounds {
                 Some((Some(bounds), Some(pos))) => {
                     detail.push_str(&format!(
@@ -965,7 +1041,9 @@ pub fn ime_probe(
         }
         None => skipped = Some("no list item block with painted fragments".to_string()),
     }
-    report.push_str(&format!("\n-- I8 the candidate anchor follows a list item's indent.\n{detail}"));
+    report.push_str(&format!(
+        "\n-- I8 the candidate anchor follows a list item's indent.\n{detail}"
+    ));
     let name = "I8 the candidate anchor follows an indented block's content edge";
     checks.push(match (skipped.take(), failures.is_empty()) {
         (Some(why), _) => not_exercised(name, &why),
@@ -1005,7 +1083,11 @@ pub fn ime_probe(
         "I0 the probe restores the document and leaves no composition behind".to_string(),
         failures.is_empty(),
         if failures.is_empty() {
-            format!("{} bytes, {} edits", view.doc().len_bytes(), view.edit_count())
+            format!(
+                "{} bytes, {} edits",
+                view.doc().len_bytes(),
+                view.edit_count()
+            )
         } else {
             failures.join("; ")
         },

@@ -31,15 +31,17 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gpui_kit::gpui::profiler::{FrameEvent, FrameTimingCollector, set_trace_enabled, trace_enabled};
+use gpui_kit::gpui::profiler::{
+    FrameEvent, FrameTimingCollector, set_trace_enabled, trace_enabled,
+};
 use gpui_kit::gpui::*;
+use typors_core::{BlockKind, Document};
+use typors_editor::view::{MarkdownView, key_bindings};
+use typors_editor::{DumpSink, ImeSink, MediaSink, SelectSink};
 use typors_probes::perf;
 use typors_probes::probe;
 use typors_probes::{PerfSink, ProbeCapture};
 use typors_render::{ApproxMetrics, DocLayout, EditorTheme};
-use typors_editor::view::{key_bindings, MarkdownView};
-use typors_editor::{DumpSink, ImeSink, MediaSink, SelectSink};
-use typors_core::{BlockKind, Document};
 
 /// How long the dump run waits for the first painted frame before giving up and
 /// falling back to approximate metrics.
@@ -66,6 +68,9 @@ enum Mode {
     DumpPerf,
     DumpNewlines(Option<(usize, usize)>),
     DumpMedia,
+    DumpLivePreview,
+    DumpBlank,
+    DumpMenu,
 }
 
 pub fn run() {
@@ -80,6 +85,9 @@ pub fn run() {
             "--dump-select" => mode = Mode::DumpSelect,
             "--dump-perf" => mode = Mode::DumpPerf,
             "--dump-media" => mode = Mode::DumpMedia,
+            "--dump-live-preview" => mode = Mode::DumpLivePreview,
+            "--dump-blank" => mode = Mode::DumpBlank,
+            "--dump-menu" => mode = Mode::DumpMenu,
             "--dump-newlines" => {
                 // Optional `<block>:<byte>` caret position, same syntax as
                 // --dump-cursor. Default: the end of the buffer.
@@ -160,6 +168,62 @@ pub fn run() {
         Mode::DumpPerf => dump_perf(source, doc, collector.as_mut()),
         Mode::DumpNewlines(target) => dump_newlines(source, doc, target),
         Mode::DumpMedia => dump_media(source, doc),
+        Mode::DumpLivePreview => run_probe(source, doc, ProbeKind::LivePreview),
+        Mode::DumpBlank => dump_blank(source, doc),
+        Mode::DumpMenu => dump_menu(),
+    }
+}
+
+fn dump_menu() {
+    let state = crate::menu::MenuState::new();
+    let mut ok = state.menus.len() == 7;
+    println!("# menu model dump\n");
+    for (index, menu) in state.menus.iter().enumerate() {
+        println!(
+            "[{}] {} (Alt+{})",
+            index,
+            menu.label,
+            menu.mnemonic.to_ascii_uppercase()
+        );
+        for item in &menu.items {
+            println!(
+                "    {:<12} {:>10}  {:?}",
+                item.label, item.shortcut, item.command
+            );
+        }
+        if menu.items.is_empty() {
+            ok = false;
+        }
+    }
+    println!("\nresult: {}", if ok { "PASS" } else { "FAIL" });
+    std::process::exit(if ok { 0 } else { 1 });
+}
+
+fn dump_blank(source: Option<PathBuf>, doc: Document) {
+    let name = name_of(&source);
+    let capture: Arc<Mutex<Option<typors_editor::ProbeCapture>>> = Arc::new(Mutex::new(None));
+    let sink = capture.clone();
+    gpui_kit::application().run(move |cx: &mut App| {
+        let entity = cx.new(|cx| MarkdownView::new(doc.clone(), cx));
+        let result = entity.update(cx, |view, _cx| typors_probes::probe::blank_probe(view));
+        if let Ok(mut guard) = sink.lock() {
+            *guard = Some(result);
+        }
+        cx.quit();
+    });
+    let capture = capture.lock().ok().and_then(|guard| guard.clone());
+    match capture {
+        Some(capture) => {
+            println!("# blank document dump of {name}\n");
+            let ok = typors_probes::probe::render_capture(&capture);
+            println!("\nresult: {}", if ok { "PASS" } else { "FAIL" });
+            let _ = std::io::stdout().flush();
+            std::process::exit(if ok { 0 } else { 1 });
+        }
+        None => {
+            eprintln!("typors: the blank probe did not run");
+            std::process::exit(3);
+        }
     }
 }
 
@@ -184,7 +248,7 @@ fn load(path: Option<String>) -> (Option<PathBuf>, String) {
             eprintln!(
                 "usage: typors \
                  [--dump-layout|--dump-cursor [<block>:<byte>]|--dump-edit|--dump-newlines \
-                 [<block>:<byte>]|--dump-ime|--dump-select|--dump-perf] <file.md>"
+                 [<block>:<byte>]|--dump-ime|--dump-select|--dump-perf|--dump-blank|--dump-menu] [<file.md>]"
             );
             (None, String::new())
         }
@@ -231,7 +295,24 @@ fn open_window(source: Option<PathBuf>, doc: Document, fps: bool) {
         let view_slot: Arc<Mutex<Option<Entity<MarkdownView>>>> = Arc::new(Mutex::new(None));
         let view_open = view_slot.clone();
         let doc_dir = source.as_ref().and_then(|path| path.parent().map(std::path::Path::to_path_buf));
-        let opened = cx.open_window(window_options(), move |window, cx| {
+        let shell_source = source.clone();
+        let (settings, settings_warning) = typors_settings::Settings::load();
+        let shell_settings = settings.clone();
+        let window_title = source
+            .as_ref()
+            .and_then(|path| path.file_name())
+            .map(|name| format!("{} - typors", name.to_string_lossy()))
+            .unwrap_or_else(|| "typors".to_string());
+        let opened = cx.open_window(
+            {
+                let mut options = window_options();
+                options.titlebar = Some(TitlebarOptions {
+                    title: Some(window_title.into()),
+                    ..Default::default()
+                });
+                options
+            },
+            move |window, cx| {
             let view = cx.new(|cx| {
                 let mut view = if fps {
                     MarkdownView::with_fps(doc.clone(), cx)
@@ -246,7 +327,22 @@ fn open_window(source: Option<PathBuf>, doc: Document, fps: bool) {
             if let Ok(mut guard) = view_open.lock() {
                 *guard = Some(view.clone());
             }
-            view
+            let shell = cx.new(|cx| {
+                crate::shell::EditorShell::new(
+                    view.clone(),
+                    shell_source,
+                    shell_settings,
+                    settings_warning,
+                    cx,
+                )
+            });
+            let shell_close = shell.downgrade();
+            window.on_window_should_close(cx, move |window, cx| {
+                shell_close
+                    .update(cx, |shell, cx| shell.confirm_close(window, cx))
+                    .unwrap_or(true)
+            });
+            shell
         });
         match opened {
             Ok(_) => {
@@ -384,7 +480,9 @@ fn dump_layout(source: Option<PathBuf>, doc: Document) {
     let mut ok = true;
     match capture {
         Some(capture) => {
-            println!("# layout dump of {name} (measured by the window text system, painted frame)\n");
+            println!(
+                "# layout dump of {name} (measured by the window text system, painted frame)\n"
+            );
             print!("{}", capture.report);
             println!(
                 "timing: steady-state layout {:.3} ms (second pass, text system warm)",
@@ -444,6 +542,7 @@ fn dump_layout(source: Option<PathBuf>, doc: Document) {
 enum ProbeKind {
     Cursor(Option<(usize, usize)>),
     Edit,
+    LivePreview,
 }
 
 /// Run one of the group-4 probes against the same view the window paints.
@@ -457,6 +556,7 @@ fn run_probe(source: Option<PathBuf>, doc: Document, kind: ProbeKind) {
     let label = match kind {
         ProbeKind::Cursor(_) => "cursor probe",
         ProbeKind::Edit => "edit probe",
+        ProbeKind::LivePreview => "live-preview probe",
     };
     let holder: Arc<Mutex<Option<Entity<MarkdownView>>>> = Arc::new(Mutex::new(None));
     let capture: Arc<Mutex<Option<ProbeCapture>>> = Arc::new(Mutex::new(None));
@@ -472,7 +572,7 @@ fn run_probe(source: Option<PathBuf>, doc: Document, kind: ProbeKind) {
         let probe_kind = kind.clone();
         gpui_kit::application().run(move |cx: &mut App| {
             cx.bind_keys(key_bindings());
-        let opened = cx.open_window(window_options(), move |window, cx| {
+            let opened = cx.open_window(window_options(), move |window, cx| {
                 let view = cx.new(|cx| MarkdownView::new(window_doc.clone(), cx));
                 let focus = view.read(cx).focus_handle().clone();
                 window.focus(&focus, cx);
@@ -548,6 +648,7 @@ fn run_kind(kind: &ProbeKind, view: &mut MarkdownView) -> ProbeCapture {
     match kind {
         ProbeKind::Cursor(target) => probe::cursor_probe(view, *target),
         ProbeKind::Edit => probe::edit_probe(view),
+        ProbeKind::LivePreview => probe::live_preview_probe(view),
     }
 }
 
@@ -568,7 +669,8 @@ fn dump_ime(source: Option<PathBuf>, doc: Document) {
 
     gpui_kit::application().run(move |cx: &mut App| {
         let opened = cx.open_window(window_options(), move |window, cx| {
-            let view = cx.new(|cx| MarkdownView::with_ime_probe(window_doc.clone(), view_sink.clone(), cx));
+            let view = cx
+                .new(|cx| MarkdownView::with_ime_probe(window_doc.clone(), view_sink.clone(), cx));
             let focus = view.read(cx).focus_handle().clone();
             window.focus(&focus, cx);
             view
@@ -626,8 +728,9 @@ fn dump_select(source: Option<PathBuf>, doc: Document) {
 
     gpui_kit::application().run(move |cx: &mut App| {
         let opened = cx.open_window(window_options(), move |window, cx| {
-            let view =
-                cx.new(|cx| MarkdownView::with_select_probe(window_doc.clone(), view_sink.clone(), cx));
+            let view = cx.new(|cx| {
+                MarkdownView::with_select_probe(window_doc.clone(), view_sink.clone(), cx)
+            });
             let focus = view.read(cx).focus_handle().clone();
             window.focus(&focus, cx);
             view
@@ -717,8 +820,14 @@ fn dump_perf(source: Option<PathBuf>, doc: Document, collector: Option<&mut Fram
 
     gpui_kit::application().run(move |cx: &mut App| {
         let opened = cx.open_window(window_options(), move |window, cx| {
-            let view =
-                cx.new(|cx| MarkdownView::with_perf_probe(window_doc.clone(), view_sink.clone(), perf::perf_probe, cx));
+            let view = cx.new(|cx| {
+                MarkdownView::with_perf_probe(
+                    window_doc.clone(),
+                    view_sink.clone(),
+                    perf::perf_probe,
+                    cx,
+                )
+            });
             let focus = view.read(cx).focus_handle().clone();
             window.focus(&focus, cx);
             view
@@ -741,9 +850,7 @@ fn dump_perf(source: Option<PathBuf>, doc: Document, collector: Option<&mut Fram
             let mut lines = Vec::new();
             for event in &events {
                 if let FrameEvent::Draw(timing) = event {
-                    let draw = timing
-                        .draw_end
-                        .saturating_duration_since(timing.draw_start);
+                    let draw = timing.draw_end.saturating_duration_since(timing.draw_start);
                     lines.push(format!(
                         "draw {:>8.3} ms = request_layout {:>8.3} + prepaint {:>8.3} + paint {:>8.3} ms  (invalidations {})",
                         draw.as_secs_f64() * 1000.,
@@ -777,7 +884,8 @@ fn dump_perf(source: Option<PathBuf>, doc: Document, collector: Option<&mut Fram
     }
 }
 
-fn truncate(text: &str, max: usize) -> String {    if text.chars().count() <= max {
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
         return text.to_string();
     }
     let mut out: String = text.chars().take(max).collect();
@@ -824,7 +932,7 @@ fn dump_newlines(source: Option<PathBuf>, doc: Document, target: Option<(usize, 
         let window_doc = doc.clone();
         gpui_kit::application().run(move |cx: &mut App| {
             cx.bind_keys(key_bindings());
-        let opened = cx.open_window(window_options(), move |window, cx| {
+            let opened = cx.open_window(window_options(), move |window, cx| {
                 let view = cx.new(|cx| MarkdownView::new(window_doc.clone(), cx));
                 let focus = view.read(cx).focus_handle().clone();
                 window.focus(&focus, cx);
@@ -955,7 +1063,9 @@ fn dump_newlines(source: Option<PathBuf>, doc: Document, target: Option<(usize, 
                             })
                         })
                         .ok();
-                    capture.checks.push(newline_blank_click_check(clicked, after_click));
+                    capture
+                        .checks
+                        .push(newline_blank_click_check(clicked, after_click));
 
                     // N5: a scroll the *user* performs must not be undone. Only the
                     // offset changes here — neither the buffer nor the caret does — so
@@ -1023,7 +1133,13 @@ fn newline_frame_check(
     const NAME: &str = "N4 the frame path scrolls the caret back on screen after an edit";
     let (scroll, caret, viewport_height, page) = match observed {
         Some(values) => values,
-        None => return (NAME.to_string(), false, "the window could not be reached".to_string()),
+        None => {
+            return (
+                NAME.to_string(),
+                false,
+                "the window could not be reached".to_string(),
+            );
+        }
     };
     if page <= viewport_height + 1. {
         return (
@@ -1036,7 +1152,11 @@ fn newline_frame_check(
         );
     }
     let Some(caret) = caret else {
-        return (NAME.to_string(), false, "there is no caret to look at".to_string());
+        return (
+            NAME.to_string(),
+            false,
+            "there is no caret to look at".to_string(),
+        );
     };
     let top = caret.origin.y.as_f32();
     let bottom = top + caret.size.height.as_f32();
@@ -1059,7 +1179,13 @@ fn newline_user_scroll_check(observed: Option<(f32, f32, f32)>) -> (String, bool
     const NAME: &str = "N5 a scroll the user performed is not undone by the caret correction";
     let (scroll, viewport_height, page) = match observed {
         Some(values) => values,
-        None => return (NAME.to_string(), false, "the window could not be reached".to_string()),
+        None => {
+            return (
+                NAME.to_string(),
+                false,
+                "the window could not be reached".to_string(),
+            );
+        }
     };
     if page <= viewport_height + 1. {
         return (
@@ -1101,7 +1227,11 @@ fn blank_run_click_target(
 ) -> Option<(Point<Pixels>, usize, usize, usize, bool)> {
     let (origin, width, metrics) = {
         let published = view.layout()?;
-        (published.origin, published.size.width, view.frame_metrics()?)
+        (
+            published.origin,
+            published.size.width,
+            view.frame_metrics()?,
+        )
     };
     let layout = view.layout_now_cached(metrics, point(px(0.), px(0.)), width);
     let gap = layout.blocks.iter().rev().find(|block| {
@@ -1119,10 +1249,12 @@ fn blank_run_click_target(
     let scroll = -origin.y.as_f32();
     let margin = line_height;
     let window_y = doc_y + origin.y.as_f32();
-    let out_of_band =
-        window_y + line_height > viewport_height - margin || window_y < margin;
+    let out_of_band = window_y + line_height > viewport_height - margin || window_y < margin;
     Some((
-        point(px(gap.bounds.origin.x.as_f32() + origin.x.as_f32() + 2.), px(window_y)),
+        point(
+            px(gap.bounds.origin.x.as_f32() + origin.x.as_f32() + 2.),
+            px(window_y),
+        ),
         gap.src.start + byte,
         gap.block_idx,
         tops.len(),
@@ -1149,7 +1281,13 @@ fn newline_blank_click_check(
     };
     let (scroll, caret, viewport_height, page) = match observed {
         Some(values) => values,
-        None => return (NAME.to_string(), false, "the window could not be reached".to_string()),
+        None => {
+            return (
+                NAME.to_string(),
+                false,
+                "the window could not be reached".to_string(),
+            );
+        }
     };
     if page <= viewport_height + 1. {
         return (
@@ -1162,7 +1300,11 @@ fn newline_blank_click_check(
         );
     }
     let Some(caret) = caret else {
-        return (NAME.to_string(), false, "there is no caret to look at".to_string());
+        return (
+            NAME.to_string(),
+            false,
+            "there is no caret to look at".to_string(),
+        );
     };
     let landed = got == Some(expected_src);
     let top = caret.origin.y.as_f32();

@@ -20,6 +20,7 @@ That produces:
 ```text
 target\release\typors.exe          ~145 KB loader
 target\release\typors_runtime.dll  ~16 MB runtime
+target\release\typors_mermaid.dll  ~28 MB Mermaid (lazy)
 assets\typors.ico
 assets\sample-picture.png
 sample.md

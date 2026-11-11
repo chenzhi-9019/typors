@@ -36,8 +36,8 @@ use std::{
 
 use gpui_kit::gpui::*;
 
-use typors_core::doc::{self, Block, BlockKind, Document, ObjectKind, SpanKind};
 use typors_core::MarkedText;
+use typors_core::doc::{self, Block, BlockKind, Document, ObjectKind, SpanKind};
 
 /// Upper bound on the `A4` geometry probes: each probe re-shapes a fragment, so a
 /// 100k-character document would otherwise spend minutes in the check.
@@ -165,7 +165,8 @@ pub trait Metrics: fmt::Debug + 'static {
     /// Advance width of one line of text.
     fn advance(&self, text: &str, font_size: Pixels, style: doc::Style) -> Pixels;
     /// x offset of `index` (a UTF-8 byte offset inside `text`).
-    fn x_for_index(&self, text: &str, font_size: Pixels, style: doc::Style, index: usize) -> Pixels;
+    fn x_for_index(&self, text: &str, font_size: Pixels, style: doc::Style, index: usize)
+    -> Pixels;
     /// Nearest byte offset to `x` inside `text`.
     fn index_for_x(&self, text: &str, font_size: Pixels, style: doc::Style, x: Pixels) -> usize;
     /// Distance from the line box top to the baseline. Objects use this to align
@@ -178,7 +179,12 @@ pub trait Metrics: fmt::Debug + 'static {
 
 /// The font a span is drawn with. Heading bold and code monospace are forced by
 /// the block, inline emphasis/monospace come from the span itself.
-pub fn font_for(base: &Font, mono_family: &SharedString, style: doc::Style, force_bold: bool) -> Font {
+pub fn font_for(
+    base: &Font,
+    mono_family: &SharedString,
+    style: doc::Style,
+    force_bold: bool,
+) -> Font {
     let mut font = base.clone();
     if style.code {
         font.family = mono_family.clone();
@@ -296,7 +302,13 @@ impl Metrics for WindowMetrics {
             .width()
     }
 
-    fn x_for_index(&self, text: &str, font_size: Pixels, style: doc::Style, index: usize) -> Pixels {
+    fn x_for_index(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        style: doc::Style,
+        index: usize,
+    ) -> Pixels {
         let line = self.shaped(text, font_size, style, false, rgba(0x000000FF), false);
         line.x_for_index(index.min(text.len()))
     }
@@ -329,8 +341,14 @@ pub struct ApproxMetrics;
 impl ApproxMetrics {
     fn em(ch: char) -> f32 {
         match ch as u32 {
-            0x1100..=0x115F | 0x2E80..=0xA4CF | 0xAC00..=0xD7A3 | 0xF900..=0xFAFF
-            | 0xFE30..=0xFE6F | 0xFF00..=0xFF60 | 0xFFE0..=0xFFE6 | 0x1F300..=0x1FAFF
+            0x1100..=0x115F
+            | 0x2E80..=0xA4CF
+            | 0xAC00..=0xD7A3
+            | 0xF900..=0xFAFF
+            | 0xFE30..=0xFE6F
+            | 0xFF00..=0xFF60
+            | 0xFFE0..=0xFFE6
+            | 0x1F300..=0x1FAFF
             | 0x20000..=0x3FFFD => 1.0,
             0x0300..=0x036F => 0.0, // combining marks
             0x200D => 0.0,          // ZWJ
@@ -359,7 +377,13 @@ impl Metrics for ApproxMetrics {
         px(Self::width_f32(text, font_size, style))
     }
 
-    fn x_for_index(&self, text: &str, font_size: Pixels, style: doc::Style, index: usize) -> Pixels {
+    fn x_for_index(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        style: doc::Style,
+        index: usize,
+    ) -> Pixels {
         let index = index.min(text.len());
         px(Self::width_f32(&text[..index], font_size, style))
     }
@@ -386,6 +410,8 @@ pub struct EditorTheme {
     pub body_size: f32,
     pub line_ratio: f32,
     pub page_pad: f32,
+    /// Typora `#write` max width (860/1024/1200 at the CSS breakpoints).
+    pub page_width: f32,
     pub block_gap: f32,
     pub heading_gap: f32,
     pub heading_scale: [f32; 6],
@@ -413,34 +439,64 @@ pub struct EditorTheme {
     pub selection: Rgba,
 }
 
+impl EditorTheme {
+    /// Typora's light/default tokens plus the persisted appearance overrides.
+    pub fn from_settings(settings: &typors_settings::Settings) -> Self {
+        let mut theme = Self::default();
+        theme.body_size = settings.appearance.font_size;
+        theme.line_ratio = settings.appearance.line_height;
+        theme.page_width = settings.appearance.page_width;
+        if settings.appearance.theme == typors_settings::ThemeChoice::Dark {
+            theme = theme.dark();
+        }
+        theme
+    }
+
+    /// Typora `night.css` palette; typography stays from the current theme.
+    pub fn dark(mut self) -> Self {
+        self.page_bg = rgb(0x363B40);
+        self.text = rgb(0xDEDEDE);
+        self.muted = rgb(0x9E9E9E);
+        self.code_text = rgb(0xDEDEDE);
+        self.code_bg = rgb(0x2F3438);
+        self.link = rgb(0x6FB3E0);
+        self.rule = rgb(0x4A4F55);
+        self.quote_bar = rgb(0x5A6066);
+        self.caret = rgb(0xDEDEDE);
+        self.selection = rgb(0x4A6B8A);
+        self
+    }
+}
+
 impl Default for EditorTheme {
     fn default() -> Self {
         Self {
-            body_size: 17.,
-            line_ratio: 1.55,
-            page_pad: 32.,
-            block_gap: 10.,
-            heading_gap: 20.,
-            heading_scale: [1.9, 1.55, 1.3, 1.15, 1.05, 1.0],
-            heading_line_ratio: 1.3,
-            code_ratio: 0.92,
-            code_pad: 12.,
-            indent_per_level: 22.,
-            bullet_col: 22.,
-            quote_indent: 16.,
-            quote_bar_w: 3.,
-            rule_thickness: 1.,
+            body_size: 16.,
+            line_ratio: 1.6,
+            page_pad: 30.,
+            page_width: 860.,
+            block_gap: 12.8,
+            heading_gap: 16.,
+            heading_scale: [2.0, 1.8, 1.6, 1.4, 1.2, 1.0],
+            heading_line_ratio: 1.4,
+            code_ratio: 0.9,
+            code_pad: 8.,
+            indent_per_level: 30.,
+            bullet_col: 30.,
+            quote_indent: 15.,
+            quote_bar_w: 4.,
+            rule_thickness: 2.,
             mono_family: "Consolas".into(),
             page_bg: rgb(0xFFFFFF),
-            text: rgb(0x24292F),
-            muted: rgb(0x6E7781),
-            code_text: rgb(0x1F2328),
-            code_bg: rgb(0xF6F8FA),
-            link: rgb(0x0969DA),
-            rule: rgb(0xD0D7DE),
-            quote_bar: rgb(0xD0D7DE),
-            caret: rgb(0x1F2328),
-            selection: rgb(0xCCE0FF),
+            text: rgb(0x333333),
+            muted: rgb(0x777777),
+            code_text: rgb(0x333333),
+            code_bg: rgb(0xF8F8F8),
+            link: rgb(0x4183C4),
+            rule: rgb(0xE7E7E7),
+            quote_bar: rgb(0xDFE2E5),
+            caret: rgb(0x333333),
+            selection: rgb(0xB5D6FC),
         }
     }
 }
@@ -493,6 +549,13 @@ impl MediaMeasures for NoMedia {
                 height: px(240.),
                 ascent: px(180.),
                 descent: px(60.),
+                display: true,
+            },
+            ObjectKind::Chart { .. } => ObjectMetrics {
+                width: px(560.),
+                height: px(340.),
+                ascent: px(255.),
+                descent: px(85.),
                 display: true,
             },
         }
@@ -590,6 +653,18 @@ pub struct BlockBox {
     pub objects: Vec<ObjectBox>,
 }
 
+/// One visual line of a block, exposed for caret and hit testing.
+#[derive(Clone, Debug)]
+pub struct LineBox {
+    pub top: Pixels,
+    pub bottom: Pixels,
+    pub left: Pixels,
+    pub right: Pixels,
+    pub height: Pixels,
+    /// Byte range inside the block's display text, excluding the newline.
+    pub render: Range<usize>,
+}
+
 impl BlockBox {
     /// The text this block paints: the render projection, or its raw source.
     pub fn display_text(&self) -> &str {
@@ -607,7 +682,11 @@ impl BlockBox {
             .spans
             .iter()
             .map(|span| (span.render.start, span.text.as_str()))
-            .chain(self.objects.iter().map(|object| (object.render.start, "\u{FFFC}")))
+            .chain(
+                self.objects
+                    .iter()
+                    .map(|object| (object.render.start, "\u{FFFC}")),
+            )
             .collect();
         parts.sort_by_key(|(start, _)| *start);
         parts.into_iter().map(|(_, text)| text).collect()
@@ -918,9 +997,7 @@ fn kind_tag(kind: &BlockKind) -> [u64; 2] {
     match kind {
         BlockKind::Heading { level } => [1, *level as u64],
         BlockKind::Paragraph => [2, 0],
-        BlockKind::ListItem { ordered, level } => {
-            [3, u64::from(*ordered) | ((*level as u64) << 8)]
-        }
+        BlockKind::ListItem { ordered, level } => [3, u64::from(*ordered) | ((*level as u64) << 8)],
         BlockKind::FencedCode { info } => [4, hash_str(info)],
         BlockKind::IndentedCode => [5, 0],
         BlockKind::BlockQuote => [6, 0],
@@ -1007,16 +1084,7 @@ impl DocLayout {
         cache: Option<&mut BlockCache>,
     ) -> Self {
         Self::layout_mode_marked_cached_media(
-            doc,
-            theme,
-            metrics,
-            origin,
-            width,
-            mode,
-            marked,
-            &NoMedia,
-            0,
-            cache,
+            doc, theme, metrics, origin, width, mode, marked, &NoMedia, 0, cache,
         )
     }
 
@@ -1040,7 +1108,8 @@ impl DocLayout {
     ) -> Self {
         let started = std::time::Instant::now();
         let page_left = px(origin.x.as_f32() + theme.page_pad);
-        let page_right = px((origin.x.as_f32() + width.as_f32() - theme.page_pad).max(page_left.as_f32() + 40.));
+        let page_right =
+            px((origin.x.as_f32() + width.as_f32() - theme.page_pad).max(page_left.as_f32() + 40.));
         let mut y = px(origin.y.as_f32() + theme.page_pad);
         let mut blocks = Vec::with_capacity(doc.blocks().len());
         let mut ordinals: Vec<usize> = Vec::new();
@@ -1176,12 +1245,18 @@ impl DocLayout {
     /// Move the whole layout (used once, from local coordinates into the
     /// element's window bounds before publishing it for hit testing).
     pub fn translate(&mut self, by: Point<Pixels>) {
-        self.origin = point(px(self.origin.x.as_f32() + by.x.as_f32()), px(self.origin.y.as_f32() + by.y.as_f32()));
+        self.origin = point(
+            px(self.origin.x.as_f32() + by.x.as_f32()),
+            px(self.origin.y.as_f32() + by.y.as_f32()),
+        );
         for block in &mut self.blocks {
             block.bounds.origin.x = px(block.bounds.origin.x.as_f32() + by.x.as_f32());
             block.bounds.origin.y = px(block.bounds.origin.y.as_f32() + by.y.as_f32());
             for span in &mut block.spans {
-                span.origin = point(px(span.origin.x.as_f32() + by.x.as_f32()), px(span.origin.y.as_f32() + by.y.as_f32()));
+                span.origin = point(
+                    px(span.origin.x.as_f32() + by.x.as_f32()),
+                    px(span.origin.y.as_f32() + by.y.as_f32()),
+                );
             }
             for decor in &mut block.decors {
                 match decor {
@@ -1190,7 +1265,10 @@ impl DocLayout {
                         bounds.origin.y = px(bounds.origin.y.as_f32() + by.y.as_f32());
                     }
                     BlockDecor::Text { origin, .. } => {
-                        *origin = point(px(origin.x.as_f32() + by.x.as_f32()), px(origin.y.as_f32() + by.y.as_f32()));
+                        *origin = point(
+                            px(origin.x.as_f32() + by.x.as_f32()),
+                            px(origin.y.as_f32() + by.y.as_f32()),
+                        );
                     }
                 }
             }
@@ -1312,7 +1390,8 @@ impl DocLayout {
             }
         }
         let span = best?.1;
-        let local = px((p.x.as_f32() - span.origin.x.as_f32()).clamp(0., span.width.as_f32().max(0.)));
+        let local =
+            px((p.x.as_f32() - span.origin.x.as_f32()).clamp(0., span.width.as_f32().max(0.)));
         let index = nearest_boundary(
             self.metrics.as_ref(),
             &span.text,
@@ -1330,7 +1409,11 @@ impl DocLayout {
     /// Fragment owning a byte offset of a block's painted text, plus the x
     /// offset inside it. This is the primitive `bounds_for_range` (IME, group 6)
     /// and caret painting both need.
-    pub fn caret_x(&self, block_idx: usize, render_byte: usize) -> Option<(Pixels, Pixels, Pixels)> {
+    pub fn caret_x(
+        &self,
+        block_idx: usize,
+        render_byte: usize,
+    ) -> Option<(Pixels, Pixels, Pixels)> {
         let block = self.blocks.get(block_idx)?;
         if let Some(object) = block
             .objects
@@ -1344,31 +1427,107 @@ impl DocLayout {
             };
             return Some((x, object.bounds.top(), object.bounds.size.height));
         }
-        let Some(span) = block
-            .spans
-            .iter()
-            .find(|s| s.render.start <= render_byte && render_byte <= s.render.end)
-            .or_else(|| block.spans.last())
-        else {
+        if block.spans.is_empty() {
             // A block without fragments — a blank line, or a rule — still has a
             // caret: it sits at the content edge of **its own** line box.
-            //
-            // Its own line matters. A run of blank lines is one `Gap` block with one
-            // line box per newline, so a caret that was always drawn at the block's
-            // top stood still while the user pressed Enter: the ribbon did not move,
-            // and (「回车后光标不跟随」, half two) no scroll correction could follow a
-            // caret that never moved.
             let y = px(block.bounds.origin.y.as_f32()
                 + blank_line_index(block, render_byte) as f32 * block.line_height.as_f32());
             return Some((block.content_left, y, block.line_height));
+        }
+
+        let lines = line_ranges(block);
+        let line_idx = line_index_for_byte(block, render_byte);
+        let line = lines.get(line_idx)?;
+        let line_spans: Vec<&DrawSpan> = block
+            .spans
+            .iter()
+            .filter(|span| span.render.start >= line.start && span.render.start <= line.end)
+            .collect();
+        let line_top = line_spans.first().map_or(
+            px(block.bounds.origin.y.as_f32() + line_idx as f32 * block.line_height.as_f32()),
+            |span| span.origin.y,
+        );
+        if line.start == line.end || line_spans.is_empty() {
+            return Some((block.content_left, line_top, block.line_height));
+        }
+        let first = line_spans[0];
+        if render_byte <= first.render.start {
+            return Some((first.origin.x, first.origin.y, first.line_height));
+        }
+        let Some(span) = line_spans
+            .iter()
+            .rev()
+            .find(|span| span.render.start <= render_byte)
+        else {
+            return Some((first.origin.x, first.origin.y, first.line_height));
         };
-        let local = render_byte.clamp(span.render.start, span.render.end) - span.render.start;
+        let local = render_byte
+            .saturating_sub(span.render.start)
+            .min(span.render.end.saturating_sub(span.render.start))
+            .min(span.text.len());
         let local = snap_floor(&span.text, local);
-        let x = span.origin.x
+        let raw = span.origin.x
             + self
                 .metrics
                 .x_for_index(&span.text, span.font_size, span.style, local);
+        let x = if block.mode == BlockMode::Rendered {
+            raw.min(block.bounds.right() - px(2.0))
+                .max(block.bounds.left())
+        } else {
+            raw
+        };
         Some((x, span.origin.y, span.line_height))
+    }
+
+    /// Visual line ranges of a block's painted text, excluding each `\n`.
+    pub fn line_ranges(&self, block_idx: usize) -> Vec<Range<usize>> {
+        self.blocks
+            .get(block_idx)
+            .map(line_ranges)
+            .unwrap_or_default()
+    }
+
+    /// Which visual line owns `render_byte`. A byte at a newline belongs to the
+    /// line it terminates; a byte just after it belongs to the next line.
+    pub fn line_index_for_byte(&self, block_idx: usize, render_byte: usize) -> Option<usize> {
+        self.blocks
+            .get(block_idx)
+            .map(|block| line_index_for_byte(block, render_byte))
+    }
+
+    /// Geometry of one visual line: its box, its content edges and its render
+    /// range (the newline itself is not part of the range).
+    pub fn line_bounds(&self, block_idx: usize, line: usize) -> Option<LineBox> {
+        let block = self.blocks.get(block_idx)?;
+        let ranges = line_ranges(block);
+        let range = ranges.get(line)?.clone();
+        let spans: Vec<&DrawSpan> = block
+            .spans
+            .iter()
+            .filter(|span| span.render.start >= range.start && span.render.start <= range.end)
+            .collect();
+        let (top, height, left, right) = match (spans.first(), spans.last()) {
+            (Some(first), Some(last)) => (
+                first.origin.y,
+                first.line_height,
+                first.origin.x,
+                px(last.origin.x.as_f32() + last.width.as_f32()),
+            ),
+            _ => (
+                px(block.bounds.origin.y.as_f32() + line as f32 * block.line_height.as_f32()),
+                block.line_height,
+                block.content_left,
+                block.content_left,
+            ),
+        };
+        Some(LineBox {
+            top,
+            bottom: px(top.as_f32() + height.as_f32()),
+            left,
+            right,
+            height,
+            render: range,
+        })
     }
 
     /// Caret rectangle for `(block_idx, render_byte)`: 2px wide, one line tall.
@@ -1406,8 +1565,9 @@ impl DocLayout {
             // single top (which is what made the caret stick while the run grew).
             let lines = blank_line_count(block);
             for line in 0..lines.max(1) {
-                tops.push(px(block.bounds.origin.y.as_f32()
-                    + line as f32 * block.line_height.as_f32()));
+                tops.push(px(
+                    block.bounds.origin.y.as_f32() + line as f32 * block.line_height.as_f32()
+                ));
             }
         }
         tops
@@ -1484,9 +1644,9 @@ impl DocLayout {
                 // An offset inside the composition has no buffer position of its
                 // own: it belongs to the anchor, which is where the caret is.
                 let local = match &block.marked {
-                    Some(m) if display > m.start => display
-                        .saturating_sub(m.end - m.start)
-                        .max(m.start),
+                    Some(m) if display > m.start => {
+                        display.saturating_sub(m.end - m.start).max(m.start)
+                    }
                     _ => display,
                 };
                 Some(block.src.start + local)
@@ -1604,7 +1764,8 @@ impl DocLayout {
                     )),
                     BlockDecor::Text { text, origin, .. } => out.push_str(&format!(
                         "        decor text  {text:?} @ ({:.1},{:.1})\n",
-                        origin.x.as_f32(), origin.y.as_f32()
+                        origin.x.as_f32(),
+                        origin.y.as_f32()
                     )),
                 }
             }
@@ -1626,6 +1787,7 @@ impl DocLayout {
                     ObjectKind::Math { display: true, .. } => "display-math",
                     ObjectKind::Math { display: false, .. } => "inline-math",
                     ObjectKind::Diagram { .. } => "diagram",
+                    ObjectKind::Chart { .. } => "chart",
                 };
                 out.push_str(&format!(
                     "        object {:>2} {:<12} @({:.1},{:.1}) {}x{} src={:?} display={}\n",
@@ -1654,7 +1816,8 @@ impl DocLayout {
     ///   no Markdown marking characters (`**`, backtick, leading `#`, `- `).
     /// * `A5` the projection switch is block-local: at most one block is source,
     ///   it is the requested one, and it paints its raw Markdown source.
-    pub fn checks(&self, doc: &Document) -> Vec<(String, bool, String)> {        let mut results = Vec::new();
+    pub fn checks(&self, doc: &Document) -> Vec<(String, bool, String)> {
+        let mut results = Vec::new();
 
         let mut a1_bad = Vec::new();
         for block in &self.blocks {
@@ -1663,7 +1826,11 @@ impl DocLayout {
                 continue;
             }
             let painted = painted_text(block);
-            let expected: String = block.display_text().chars().filter(|c| *c != '\n').collect();
+            let expected: String = block
+                .display_text()
+                .chars()
+                .filter(|c| *c != '\n')
+                .collect();
             if painted != expected {
                 a1_bad.push(format!(
                     "block {}: painted {:?} != displayed {:?}",
@@ -1744,7 +1911,10 @@ impl DocLayout {
             for span in &block.spans {
                 painted_fragments += 1;
                 let Some(src_span) = src.spans.get(span.span_idx) else {
-                    a2_bad.push(format!("block {}: span {} missing", block.block_idx, span.span_idx));
+                    a2_bad.push(format!(
+                        "block {}: span {} missing",
+                        block.block_idx, span.span_idx
+                    ));
                     continue;
                 };
                 if matches!(src_span.kind, SpanKind::Marker(_)) {
@@ -1795,7 +1965,8 @@ impl DocLayout {
                 continue;
             };
             for (i, span) in src.spans.iter().enumerate() {
-                if matches!(span.kind, SpanKind::Marker(_)) && span.render.start != span.render.end {
+                if matches!(span.kind, SpanKind::Marker(_)) && span.render.start != span.render.end
+                {
                     a3_bad.push(format!(
                         "block {} span {i}: a Marker span has a non-empty render range",
                         block.block_idx
@@ -1822,7 +1993,9 @@ impl DocLayout {
             {
                 a3_bad.push(format!(
                     "block {}: first fragment at x={:.1} is shifted from the content edge {:.1}",
-                    block.block_idx, first.origin.x.as_f32(), block.bounds.origin.x.as_f32()
+                    block.block_idx,
+                    first.origin.x.as_f32(),
+                    block.bounds.origin.x.as_f32()
                 ));
             }
         }
@@ -1842,7 +2015,8 @@ impl DocLayout {
         let mut a4_probes = 0usize;
         for block in &self.blocks {
             if block.bounds.size.height.as_f32() > 0. {
-                let mid = px(block.bounds.origin.y.as_f32() + block.bounds.size.height.as_f32() / 2.);
+                let mid =
+                    px(block.bounds.origin.y.as_f32() + block.bounds.size.height.as_f32() / 2.);
                 match self.block_at_y(mid) {
                     Some(found) if found == block.block_idx => {}
                     other => a4_bad.push(format!(
@@ -1863,7 +2037,10 @@ impl DocLayout {
                     let render_byte = span.render.start + local;
                     a4_probes += 1;
                     if let Some((x, y, line_height)) = self.caret_x(block.block_idx, render_byte) {
-                        let probe = point(px(x.as_f32() + 0.5), px(y.as_f32() + line_height.as_f32() / 2.));
+                        let probe = point(
+                            px(x.as_f32() + 0.5),
+                            px(y.as_f32() + line_height.as_f32() / 2.),
+                        );
                         match self.hit(probe) {
                             Some(hit) => match self.caret_x(hit.block_idx, hit.render_byte) {
                                 Some((x2, _, _)) if (x2.as_f32() - x.as_f32()).abs() <= 1.5 => {}
@@ -1889,7 +2066,14 @@ impl DocLayout {
             "A4 caret x <-> hit round-trip and block_at_y self-consistency".to_string(),
             a4_bad.is_empty(),
             if a4_bad.is_empty() {
-                format!("{a4_probes} probes{}", if a4_probes >= A4_MAX_PROBES { " (capped)" } else { "" })
+                format!(
+                    "{a4_probes} probes{}",
+                    if a4_probes >= A4_MAX_PROBES {
+                        " (capped)"
+                    } else {
+                        ""
+                    }
+                )
             } else {
                 a4_bad.join("; ")
             },
@@ -2018,6 +2202,35 @@ fn blank_line_index(block: &BlockBox, render_byte: usize) -> usize {
 /// Line `k` starts right after the `k`-th newline of the run (line 0 starts at the
 /// block's first byte), which is exactly the byte [`blank_line_index`] maps back to
 /// `k` — so `hit` and `caret_x` are inverses inside a blank run too.
+fn line_ranges(block: &BlockBox) -> Vec<Range<usize>> {
+    let text = block.display_text();
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    for (index, ch) in text.char_indices() {
+        if ch == '\n' {
+            ranges.push(start..index);
+            start = index + 1;
+        }
+    }
+    ranges.push(start..text.len());
+    ranges
+}
+
+fn line_index_for_byte(block: &BlockBox, render_byte: usize) -> usize {
+    let text = block.display_text();
+    let byte = render_byte.min(text.len());
+    let mut line = 0usize;
+    for (index, ch) in text.char_indices() {
+        if ch == '\n' {
+            if byte <= index {
+                return line;
+            }
+            line += 1;
+        }
+    }
+    line
+}
+
 fn blank_line_start(block: &BlockBox, line: usize) -> usize {
     let text = block.display_text();
     if line == 0 {
@@ -2083,7 +2296,9 @@ fn nearest_boundary(
 ) -> usize {
     let upper = snap_floor(
         text,
-        metrics.index_for_x(text, font_size, style, x).min(text.len()),
+        metrics
+            .index_for_x(text, font_size, style, x)
+            .min(text.len()),
     );
     if upper == 0 {
         return 0;
@@ -2139,7 +2354,10 @@ fn bullet(
     };
     let size = px(theme.body_size);
     let width = metrics.advance(&text, size, doc::Style::PLAIN);
-    let x = px((indent.as_f32() + theme.bullet_col - theme.block_gap - width.as_f32()).max(indent.as_f32()));
+    let x = px(
+        (indent.as_f32() + theme.bullet_col - theme.block_gap - width.as_f32())
+            .max(indent.as_f32()),
+    );
     BlockDecor::Text {
         text,
         origin: point(x, top),
@@ -2347,7 +2565,10 @@ fn block_geometry(
             }
             .run_mode(source_view, &mut spans, &mut objects);
             let plate = Bounds::new(
-                point(px((page_left.as_f32() - theme.code_pad).max(origin_x.as_f32())), top),
+                point(
+                    px((page_left.as_f32() - theme.code_pad).max(origin_x.as_f32())),
+                    top,
+                ),
                 size(
                     px(page_right.as_f32() - page_left.as_f32() + theme.code_pad * 2.),
                     px(bottom.as_f32() - top.as_f32() + theme.code_pad),
@@ -2383,7 +2604,10 @@ fn block_geometry(
             decors.push(BlockDecor::Quad {
                 bounds: Bounds::new(
                     point(page_left, top),
-                    size(px(theme.quote_bar_w), px((bottom.as_f32() - top.as_f32()).max(1.))),
+                    size(
+                        px(theme.quote_bar_w),
+                        px((bottom.as_f32() - top.as_f32()).max(1.)),
+                    ),
                 ),
                 color: theme.quote_bar,
             });
@@ -2394,7 +2618,10 @@ fn block_geometry(
             decors.push(BlockDecor::Quad {
                 bounds: Bounds::new(
                     point(page_left, bar_top),
-                    size(px(page_right.as_f32() - page_left.as_f32()), px(theme.rule_thickness)),
+                    size(
+                        px(page_right.as_f32() - page_left.as_f32()),
+                        px(theme.rule_thickness),
+                    ),
                 ),
                 color: theme.rule,
             });
@@ -2459,10 +2686,9 @@ fn block_geometry(
         .map(|s| s.origin.x)
         .or_else(|| objects.first().map(|o| o.bounds.origin.x))
         .unwrap_or(box_left);
-    let line_height = spans.first().map_or_else(
-        || px(theme.body_size * theme.line_ratio),
-        |s| s.line_height,
-    );
+    let line_height = spans
+        .first()
+        .map_or_else(|| px(theme.body_size * theme.line_ratio), |s| s.line_height);
     BlockGeometry {
         spans,
         objects,
@@ -2674,7 +2900,6 @@ fn source_slice(doc: &Document, src: &Range<usize>) -> String {
     doc.rope().slice(start..end).to_string()
 }
 
-
 // ---------------------------------------------------------------- flow
 
 /// Lays one block's visible spans out as lines.
@@ -2768,11 +2993,9 @@ impl Flow<'_> {
                     line_height = px(line_height.as_f32().max(metrics.height.as_f32()));
                     baseline_ascent = px(baseline_ascent.as_f32().max(metrics.ascent.as_f32()));
                     if metrics.display {
-                        line_height = px(
-                            line_height
-                                .as_f32()
-                                .max(metrics.height.as_f32() + media_margin.as_f32() * 2.),
-                        );
+                        line_height = px(line_height
+                            .as_f32()
+                            .max(metrics.height.as_f32() + media_margin.as_f32() * 2.));
                     }
                 }
             }
@@ -2853,8 +3076,8 @@ impl Flow<'_> {
                             objects.push(ObjectBox {
                                 span_idx: *span_idx,
                                 kind: kind.clone(),
-font_size: self.font_size,
-render: self.block.spans[*span_idx].render.clone(),
+                                font_size: self.font_size,
+                                render: self.block.spans[*span_idx].render.clone(),
                                 source: self.block.spans[*span_idx].src.clone(),
                                 bounds: Bounds::new(point(x, top), size(width, height)),
                                 baseline: px(top.as_f32() + metrics.ascent.as_f32()),
@@ -2871,8 +3094,8 @@ render: self.block.spans[*span_idx].render.clone(),
                             objects.push(ObjectBox {
                                 span_idx: *span_idx,
                                 kind: kind.clone(),
-font_size: self.font_size,
-render: self.block.spans[*span_idx].render.clone(),
+                                font_size: self.font_size,
+                                render: self.block.spans[*span_idx].render.clone(),
                                 source: self.block.spans[*span_idx].src.clone(),
                                 bounds: Bounds::new(point(x, top), size(width, height)),
                                 baseline: px(top.as_f32() + metrics.ascent.as_f32()),
@@ -2883,8 +3106,7 @@ render: self.block.spans[*span_idx].render.clone(),
                             first_on_line = true;
                             advanced_for_object = true;
                         } else {
-                            if pen.as_f32() + width.as_f32() > self.right.as_f32()
-                                && !first_on_line
+                            if pen.as_f32() + width.as_f32() > self.right.as_f32() && !first_on_line
                             {
                                 y = px(y.as_f32() + line_height.as_f32());
                                 pen = self.left;
@@ -2894,8 +3116,8 @@ render: self.block.spans[*span_idx].render.clone(),
                             objects.push(ObjectBox {
                                 span_idx: *span_idx,
                                 kind: kind.clone(),
-font_size: self.font_size,
-render: self.block.spans[*span_idx].render.clone(),
+                                font_size: self.font_size,
+                                render: self.block.spans[*span_idx].render.clone(),
                                 source: self.block.spans[*span_idx].src.clone(),
                                 bounds: Bounds::new(point(pen, top), size(width, height)),
                                 baseline,
@@ -3044,7 +3266,6 @@ fn source_lines(text: &str, marked: Option<Range<usize>>) -> Vec<Vec<Seg>> {
     lines
 }
 
-
 // ---------------------------------------------------------------- fingerprint
 
 /// A hash of every block's geometry, so a cached layout can be compared with an
@@ -3149,15 +3370,22 @@ mod tests {
         assert!(rendered.checks(&doc).iter().all(|(_, ok, _)| *ok));
 
         assert_eq!(source.blocks[0].mode, BlockMode::Source);
-        assert!(painted(&source, 0).starts_with("# "), "{:?}", painted(&source, 0));
+        assert!(
+            painted(&source, 0).starts_with("# "),
+            "{:?}",
+            painted(&source, 0)
+        );
         // The other blocks keep their render projection, marker-free.
         for block in source.blocks.iter().skip(1) {
             assert_eq!(block.mode, BlockMode::Rendered);
             assert_eq!(block.display_text(), doc.blocks()[block.block_idx].render);
         }
-        assert!(source.checks(&doc).iter().all(|(_, ok, detail)| {
-            *ok || panic!("check failed: {detail}")
-        }));
+        assert!(
+            source
+                .checks(&doc)
+                .iter()
+                .all(|(_, ok, detail)| { *ok || panic!("check failed: {detail}") })
+        );
     }
 
     #[test]
@@ -3191,7 +3419,10 @@ mod tests {
                 "byte {local}"
             );
         }
-        assert_eq!(unpainted, 1, "only the trailing newline has no painted position");
+        assert_eq!(
+            unpainted, 1,
+            "only the trailing newline has no painted position"
+        );
     }
 
     #[test]
@@ -3213,7 +3444,8 @@ mod tests {
             None,
             Some(&mut cache),
         );
-        let ((m_hits, m_misses), cold_fingerprint) = (cache.stats(), super::geometry_fingerprint(&cold));
+        let ((m_hits, m_misses), cold_fingerprint) =
+            (cache.stats(), super::geometry_fingerprint(&cold));
         assert_eq!((m_hits, m_misses), (0, doc.blocks().len() as u64));
 
         let warm = DocLayout::layout_mode_marked_cached(
@@ -3262,7 +3494,11 @@ mod tests {
         // Another pass first, so the entries really are there and a stale hit is
         // possible.
         let _ = render(&doc, &mut cache);
-        assert_eq!(cache.stats().1, doc.blocks().len() as u64, "one cold pass only");
+        assert_eq!(
+            cache.stats().1,
+            doc.blocks().len() as u64,
+            "one cold pass only"
+        );
 
         // An edit bumps `Document::revision`, which is the cache stamp: the layout
         // must be recomputed, not re-used.
@@ -3319,7 +3555,10 @@ mod tests {
         assert_eq!(band.top, 200.);
         assert_eq!(band.bottom, 2600.);
 
-        assert!(band.intersects(1000., 1050.), "a line at the top of the viewport");
+        assert!(
+            band.intersects(1000., 1050.),
+            "a line at the top of the viewport"
+        );
         assert!(band.intersects(2500., 2550.), "inside the bottom margin");
         assert!(!band.intersects(3000., 3050.), "below the margin");
         assert!(!band.intersects(0., 50.), "above the margin");
@@ -3348,6 +3587,124 @@ mod tests {
     }
 
     #[test]
+    fn caret_at_line_starts_and_trailing_newline() {
+        let (doc, layout) = layout("a\nb\n", LayoutMode::RENDERED);
+        let block = &layout.blocks[0];
+        let left = block.content_left;
+        let line = block.line_height;
+
+        let (x, y, h) = layout.caret_x(0, 0).expect("start");
+        assert_eq!(x, left);
+        assert_eq!(y, block.bounds.origin.y);
+        assert_eq!(h, line);
+
+        let (end_a, _, _) = layout.caret_x(0, 1).expect("end of first line");
+        assert!(end_a > left, "caret before newline is after the text");
+
+        let (start_b, y_b, _) = layout.caret_x(0, 2).expect("start of second line");
+        assert_eq!(start_b, left, "line start is the content edge");
+        assert!(
+            (y_b.as_f32() - (block.bounds.origin.y.as_f32() + line.as_f32())).abs() < 0.5,
+            "second line top, got {:.1}",
+            y_b.as_f32()
+        );
+
+        let (end_x, end_y, end_h) = layout.caret_x(0, 4).expect("end of document");
+        assert!(end_x > left || end_y > block.bounds.origin.y);
+        assert_eq!(end_h, line);
+
+        let _ = doc;
+    }
+
+    #[test]
+    fn caret_height_uses_the_owning_line_box() {
+        let (_, heading) = layout("# 标题\n", LayoutMode::RENDERED);
+        let h = heading.blocks[0].line_height;
+        let (_, _, caret_h) = heading.caret_x(0, 0).expect("heading caret");
+        assert_eq!(caret_h, h, "heading caret uses the heading line height");
+        let bounds = heading.caret_bounds(0, 0).expect("bounds");
+        assert_eq!(bounds.size.width, px(2.0));
+    }
+
+    #[test]
+    fn caret_after_an_atomic_object_uses_its_right_edge() {
+        let (_, layout) = layout("前![x](a.png)后\n", LayoutMode::RENDERED);
+        let object = &layout.blocks[0].objects[0];
+        let (x, y, h) = layout
+            .caret_x(0, object.render.end)
+            .expect("caret after the object placeholder");
+        assert_eq!(x, object.bounds.right());
+        assert_eq!(y, object.bounds.top());
+        assert_eq!(h, object.bounds.size.height);
+    }
+
+    #[test]
+    fn empty_document_lays_out_one_caret_line() {
+        let (doc, layout) = layout("", LayoutMode::RENDERED);
+        assert_eq!(doc.blocks().len(), 1);
+        assert_eq!(layout.blocks.len(), 1);
+        assert!(layout.blocks[0].bounds.size.height.as_f32() > 0.);
+        assert!(layout.blocks[0].spans.is_empty());
+        let caret = layout.caret_bounds(0, 0).expect("blank caret");
+        assert_eq!(caret.size.width, px(2.0));
+        assert!(caret.size.height.as_f32() > 0.);
+    }
+
+    #[test]
+    fn line_index_covers_every_byte_of_a_multiline_block() {
+        let (doc, layout) = layout("a\nb\nc", LayoutMode::RENDERED);
+        for byte in 0..=doc.len_bytes() {
+            let line = layout.line_index_for_byte(0, byte).expect("line for byte");
+            let bounds = layout.line_bounds(0, line).expect("line bounds");
+            assert!(bounds.bottom >= bounds.top);
+            assert!(bounds.render.start <= bounds.render.end);
+        }
+    }
+
+    #[test]
+    fn caret_paint_two_frames_after_scroll_has_one_caret_at_the_new_bounds() {
+        let (_, mut layout) = layout("first\nsecond\nthird", LayoutMode::RENDERED);
+        let frame_one = layout.caret_bounds(0, 2).expect("caret frame one");
+        // The frame after a scroll uses the translated layout; there is no second
+        // caret retained at the old origin.
+        layout.translate(point(px(0.), px(-80.)));
+        let frame_two = layout.caret_bounds(0, 2).expect("caret frame two");
+        assert_ne!(frame_one.origin.y, frame_two.origin.y);
+        assert_eq!(frame_one.size, frame_two.size);
+        let caret_blocks = layout
+            .blocks
+            .iter()
+            .filter(|block| block.block_idx == 0)
+            .count();
+        assert_eq!(caret_blocks, 1);
+    }
+
+    #[test]
+    fn caret_translation_moves_the_only_caret_with_the_document() {
+        let (_, mut layout) = layout("a\nb", LayoutMode::RENDERED);
+        let old = layout.caret_bounds(0, 2).expect("caret");
+        layout.translate(point(px(0.), px(40.)));
+        let new = layout.caret_bounds(0, 2).expect("caret after scroll");
+        assert!((new.origin.y.as_f32() - old.origin.y.as_f32() - 40.).abs() < 0.01);
+        assert_eq!(new.origin.x, old.origin.x);
+        assert_eq!(new.size, old.size);
+    }
+
+    #[test]
+    fn code_block_caret_uses_the_code_line_height() {
+        let (_, layout) = layout("```\ncode\n```\n", LayoutMode::RENDERED);
+        let block = layout
+            .blocks
+            .iter()
+            .find(|b| matches!(b.kind, BlockKind::FencedCode { .. }))
+            .expect("fence block");
+        let bounds = layout
+            .caret_bounds(block.block_idx, 0)
+            .expect("caret in code");
+        assert_eq!(bounds.size.height, block.line_height);
+    }
+
+    #[test]
     fn blank_line_owns_a_caret_line() {
         let (doc, layout) = layout(DOC, LayoutMode::RENDERED);
         let gap = layout
@@ -3355,8 +3712,13 @@ mod tests {
             .iter()
             .find(|b| b.kind == BlockKind::Gap && b.spans.is_empty())
             .expect("a blank line between the heading and the paragraph");
-        assert!(gap.bounds.size.height.as_f32() > 0., "a blank line has height");
-        let (_, top, line_height) = layout.caret_x(gap.block_idx, 0).expect("caret on a blank line");
+        assert!(
+            gap.bounds.size.height.as_f32() > 0.,
+            "a blank line has height"
+        );
+        let (_, top, line_height) = layout
+            .caret_x(gap.block_idx, 0)
+            .expect("caret on a blank line");
         assert_eq!(top, gap.bounds.origin.y);
         assert!(line_height.as_f32() > 0.);
 
@@ -3622,6 +3984,13 @@ mod tests {
                     descent: px(60.),
                     display: true,
                 },
+                ObjectKind::Chart { .. } => ObjectMetrics {
+                    width: px(560.),
+                    height: px(340.),
+                    ascent: px(255.),
+                    descent: px(85.),
+                    display: true,
+                },
             }
         }
     }
@@ -3651,11 +4020,9 @@ mod tests {
         assert_eq!(block.objects.len(), 1);
         let object = &block.objects[0];
         let text = &block.spans[0];
-        let text_baseline = px(text.origin.y.as_f32()
-            + layout
-                .metrics()
-                .ascent(text.font_size, text.style)
-                .as_f32());
+        let text_baseline =
+            px(text.origin.y.as_f32()
+                + layout.metrics().ascent(text.font_size, text.style).as_f32());
         assert!(
             (object.baseline.as_f32() - text_baseline.as_f32()).abs() < 0.01,
             "object baseline {:?} != text baseline {:?}",

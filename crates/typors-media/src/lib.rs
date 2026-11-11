@@ -9,10 +9,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod chart;
 pub mod image;
 pub mod math;
-pub mod mermaid;
 
+pub use chart::{Chart, ChartKind, render as render_chart};
 pub use image::{ImageRef, classify};
 pub use math::{DEFAULT_CACHE_CAPACITY, MathEngine, MathError, MathMetrics};
-pub use mermaid::{Diagram, DiagramError, render as render_mermaid};

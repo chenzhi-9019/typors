@@ -5,19 +5,22 @@
 //! lives in `typors-render`; the document model lives in `typors-core`.
 
 pub mod capture;
+pub mod completion;
+pub mod diagram;
 pub mod ime;
 pub mod media;
 pub mod selection;
 pub mod view;
 
 pub use capture::{
-    projection_invariants, DumpCapture, DumpSink, ImeSink, MediaProbeFn, MediaSink, PerfCapture,
-    PerfSink, ProbeCapture, SelectSink,
+    DumpCapture, DumpSink, ImeSink, MediaProbeFn, MediaSink, PerfCapture, PerfSink, ProbeCapture,
+    SelectSink, projection_invariants,
 };
-pub use ime::{log_ime, MarkedText};
+pub use completion::{CompletionItem, CompletionState, suggest as suggest_completion};
+pub use ime::{MarkedText, log_ime};
 pub use selection::{HighlightRect, History, HistoryAction, Selection, select_probe};
 pub use view::{
-    byte_to_utf16, edit_log_enabled, escape_insert, insertion_range, key_bindings, mode_for,
-    normalize_newlines, utf16_to_byte, CaretMove, CaretState, EditRecord, EditTrigger, MarkdownView,
-    PerfSample,
+    CaretMove, CaretState, EditRecord, EditTrigger, MarkdownView, PerfSample, byte_to_utf16,
+    edit_log_enabled, escape_insert, insertion_range, key_bindings, mode_for, normalize_newlines,
+    utf16_to_byte,
 };

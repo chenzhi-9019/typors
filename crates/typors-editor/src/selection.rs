@@ -45,10 +45,10 @@ use gpui_kit::gpui::{
     Bounds, ClipboardItem, Context, EntityInputHandler, Pixels, Window, point, px, size,
 };
 
-use typors_core::Document;
 use crate::capture::ProbeCapture;
-use typors_render::DocLayout;
 use crate::view::{CaretMove, EditRecord, MarkdownView};
+use typors_core::Document;
+use typors_render::DocLayout;
 
 /// Two edges of the highlight of the same visual line count as continuous when
 /// they differ by less than this many pixels (i.e. only by float rounding).
@@ -208,8 +208,17 @@ pub fn highlight_rects(
                     .as_f32();
             let right = span.origin.x.as_f32()
                 + metrics
-                    .x_for_index(&span.text, span.font_size, span.style, end - span.render.start)
+                    .x_for_index(
+                        &span.text,
+                        span.font_size,
+                        span.style,
+                        end - span.render.start,
+                    )
                     .as_f32();
+            // A span may hold the unwrapped paragraph text; a wrapped line's
+            // highlight must never leave the block box.
+            let right = right.min(block.bounds.right().as_f32());
+            let left = left.clamp(block.bounds.left().as_f32(), right);
             out.push(HighlightRect {
                 block_idx,
                 span_idx: span.span_idx,
@@ -494,10 +503,7 @@ pub fn find_cases(doc: &Document, layout: Option<&DocLayout>) -> Cases {
     if cases.across_blocks.is_none() {
         // A block with painted content, then the next block with painted content.
         for (i, block) in layout.blocks.iter().enumerate() {
-            let Some(next) = layout.blocks[i + 1..]
-                .iter()
-                .find(|b| !b.spans.is_empty())
-            else {
+            let Some(next) = layout.blocks[i + 1..].iter().find(|b| !b.spans.is_empty()) else {
                 break;
             };
             let (Some(last), Some(first)) = (block.spans.last(), next.spans.first()) else {
@@ -690,6 +696,12 @@ fn check_geometry(
             let Some((x, y, _h)) = layout.caret_x(block_idx, byte) else {
                 continue;
             };
+            // A block's trailing newline owns a source byte but no painted line:
+            // its caret sits below the block's last painted fragment. There is
+            // nothing to highlight there, so it is not an uncovered rectangle.
+            if y.as_f32() >= block.bounds.bottom().as_f32() - 0.5 {
+                continue;
+            }
             let covered = rects.iter().any(|rect| {
                 rect.block_idx == block_idx
                     && (rect.line_top - y.as_f32()).abs() < 0.5
@@ -755,7 +767,9 @@ pub fn select_probe(
 
     view.sync_layout();
     let cases = find_cases(view.doc(), view.layout());
-    report.push_str(&format!("\n-- cases found in this document --\n{cases:?}\n"));
+    report.push_str(&format!(
+        "\n-- cases found in this document --\n{cases:?}\n"
+    ));
 
     // ---------------------------------------------------------------- S1 / S2
     let mut rows = String::new();
@@ -765,14 +779,25 @@ pub fn select_probe(
     let mut pairs_checked = 0usize;
     let mut shapes_checked = 0usize;
     let mut shape_list: Vec<(&str, Option<Selection>)> = vec![
-        ("三片段：粗体→正文→行内代码（该段保持渲染态）", cases.three_fragments),
-        ("整段落（跨 4 个片段；caret 在段内，故该段为源态）", cases.whole_paragraph),
+        (
+            "三片段：粗体→正文→行内代码（该段保持渲染态）",
+            cases.three_fragments,
+        ),
+        (
+            "整段落（跨 4 个片段；caret 在段内，故该段为源态）",
+            cases.whole_paragraph,
+        ),
         ("跨块：前一块末片段 → 后一块首片段", cases.across_blocks),
         (
             "反向：同区间 anchor/head 互换（caret 因此落在段内 → 该段为源态）",
-            cases.three_fragments.map(|sel| Selection::new(sel.head, sel.anchor)),
+            cases
+                .three_fragments
+                .map(|sel| Selection::new(sel.head, sel.anchor)),
         ),
-        ("零宽标记字节（`# `），端点落在无绘制位置处", cases.marker_only),
+        (
+            "零宽标记字节（`# `），端点落在无绘制位置处",
+            cases.marker_only,
+        ),
     ];
     for (label, sel) in shape_list.drain(..) {
         let Some(sel) = sel else {
@@ -791,10 +816,22 @@ pub fn select_probe(
                 .and_then(|layout| layout.display_byte_for_src(view.doc(), end))
             {
                 Some((block_idx, byte)) => {
-                    let back = view
-                        .layout()
-                        .and_then(|layout| layout.src_for_display_byte(view.doc(), block_idx, byte));
-                    if back != Some(end) {
+                    let back = view.layout().and_then(|layout| {
+                        layout.src_for_display_byte(view.doc(), block_idx, byte)
+                    });
+                    let canonical_marker_start = view.doc().block_at_src(end).is_some_and(|idx| {
+                        let block = &view.doc().blocks()[idx];
+                        let first_text = block
+                            .spans
+                            .iter()
+                            .find(|span| matches!(span.kind, typors_core::doc::SpanKind::Text))
+                            .map(|span| span.src.start);
+                        first_text == Some(end) && back == Some(block.src.start)
+                    });
+                    if back != Some(end)
+                        && !view.doc().is_marker_byte(end)
+                        && !canonical_marker_start
+                    {
                         geometry.push(format!(
                             "src {end} -> ({block_idx},{byte}) -> {back:?} is not stable"
                         ));
@@ -858,7 +895,9 @@ pub fn select_probe(
         ("仅标记", cases.marker_only),
         (
             "反向三片段",
-            cases.three_fragments.map(|sel| Selection::new(sel.head, sel.anchor)),
+            cases
+                .three_fragments
+                .map(|sel| Selection::new(sel.head, sel.anchor)),
         ),
     ] {
         let Some(sel) = sel else {
@@ -868,7 +907,10 @@ pub fn select_probe(
         view.sync_layout();
         let expected = view.doc().text()[sel.src_range()].to_string();
         let Some(copied) = view.copy(cx) else {
-            copy_failures.push(format!("{label}: copy returned nothing for {:?}", sel.src_range()));
+            copy_failures.push(format!(
+                "{label}: copy returned nothing for {:?}",
+                sel.src_range()
+            ));
             continue;
         };
         let painted: String = view
@@ -887,17 +929,23 @@ pub fn select_probe(
             truncate(&painted, 42)
         ));
         if copied != expected {
-            copy_failures.push(format!("{label}: copied {copied:?} != buffer slice {expected:?}"));
+            copy_failures.push(format!(
+                "{label}: copied {copied:?} != buffer slice {expected:?}"
+            ));
         }
         if view.clipboard_shadow() != Some(copied.as_str()) {
-            copy_failures.push(format!("{label}: the clipboard shadow does not hold the copy"));
+            copy_failures.push(format!(
+                "{label}: the clipboard shadow does not hold the copy"
+            ));
         }
         // The difference between "copy the source" and "copy what is painted": the
         // three-fragment shape has a `**` and a backtick in the source and neither
         // in the painted text.
         if label == "三片段" {
             if !copied.contains("**") || !copied.contains('`') {
-                copy_failures.push(format!("{label}: the copy lost its Markdown markers: {copied:?}"));
+                copy_failures.push(format!(
+                    "{label}: the copy lost its Markdown markers: {copied:?}"
+                ));
             }
             if painted == copied {
                 copy_failures.push(format!("{label}: the copy equals the painted text"));
@@ -1020,8 +1068,13 @@ pub fn select_probe(
             );
             let hit_start = layout.hit(start)?;
             let hit_end = layout.hit(end)?;
-            let a = layout.src_for_display_byte(view.doc(), hit_start.block_idx, hit_start.render_byte)?;
-            let b = layout.src_for_display_byte(view.doc(), hit_end.block_idx, hit_end.render_byte)?;
+            let a = layout.src_for_display_byte(
+                view.doc(),
+                hit_start.block_idx,
+                hit_start.render_byte,
+            )?;
+            let b =
+                layout.src_for_display_byte(view.doc(), hit_end.block_idx, hit_end.render_byte)?;
             Some(Selection::new(a, b))
         });
         match visual {
@@ -1159,13 +1212,13 @@ pub fn select_probe(
         let reversed = view.selected_text_range(false, window, cx);
         commit_rows.push_str(&format!(
             "   reversed                -> {:?}\n",
-            reversed.as_ref().map(|sel| (sel.range.clone(), sel.reversed))
+            reversed
+                .as_ref()
+                .map(|sel| (sel.range.clone(), sel.reversed))
         ));
         match &reversed {
             Some(answer) if answer.reversed && answer.range.start > answer.range.end => {}
-            other => commit_failures.push(format!(
-                "a right-to-left selection reported {other:?}"
-            )),
+            other => commit_failures.push(format!("a right-to-left selection reported {other:?}")),
         }
 
         // (a) plain commit over the selection (what a key press does).
@@ -1181,7 +1234,8 @@ pub fn select_probe(
             view.caret()
         ));
         if view.doc().text() != expected_text {
-            commit_failures.push("a commit over the selection did not replace all of it".to_string());
+            commit_failures
+                .push("a commit over the selection did not replace all of it".to_string());
         }
         if view.selection().is_some() {
             commit_failures.push("the selection survived the commit".to_string());
@@ -1221,9 +1275,7 @@ pub fn select_probe(
             view.undo_depth()
         ));
         if view.doc().text() != expected_text {
-            commit_failures.push(
-                "the IME commit did not replace the whole selection".to_string(),
-            );
+            commit_failures.push("the IME commit did not replace the whole selection".to_string());
         }
         after_commit_text = Some(view.doc().text());
         view.undo();
@@ -1232,7 +1284,9 @@ pub fn select_probe(
             commit_failures.push("undoing the commit did not restore the buffer".to_string());
         }
     }
-    report.push_str(&format!("\n-- S6 选中后提交替换整个选区 (5.1/5.2) --\n{commit_rows}"));
+    report.push_str(&format!(
+        "\n-- S6 选中后提交替换整个选区 (5.1/5.2) --\n{commit_rows}"
+    ));
     let name = "S6 选中后提交（含 IME 提交）替换整个选区，且组合期间不写缓冲区";
     checks.push(match (&commit_failures.is_empty(), cases.three_fragments.is_some()) {
         (true, true) => (
@@ -1398,8 +1452,11 @@ pub fn select_probe(
     if view.doc().text() != base_text {
         undo_failures.push("walking back to the base state failed".to_string());
     }
-    report.push_str(&format!("\n-- S7 five edits / five undos / five redos (5.3) --\n{history_rows}"));
-    let name = "S7 撤销重做一致性: 5 次编辑→撤销 5 次回到初始→重做 5 次回到最终（缓冲区+块数+渲染态）";
+    report.push_str(&format!(
+        "\n-- S7 five edits / five undos / five redos (5.3) --\n{history_rows}"
+    ));
+    let name =
+        "S7 撤销重做一致性: 5 次编辑→撤销 5 次回到初始→重做 5 次回到最终（缓冲区+块数+渲染态）";
     checks.push((
         name.to_string(),
         undo_failures.is_empty(),
@@ -1527,7 +1584,8 @@ pub fn select_probe(
         ));
     }
     if render_fingerprint(view) != initial_fingerprint {
-        restore_failures.push("the painted render state differs from the one we started with".to_string());
+        restore_failures
+            .push("the painted render state differs from the one we started with".to_string());
     }
     let mut failures = Vec::new();
     restore_rows.push_str(&crate::capture::projection_invariants(
@@ -1553,7 +1611,9 @@ pub fn select_probe(
     if view.marked().is_some() {
         restore_failures.push("a composition was left behind".to_string());
     }
-    report.push_str(&format!("\n-- S9 the probe restores the document --\n{restore_rows}"));
+    report.push_str(&format!(
+        "\n-- S9 the probe restores the document --\n{restore_rows}"
+    ));
     checks.push((
         "S9 the probe restores the document and leaves no composition behind".to_string(),
         restore_failures.is_empty(),
@@ -1617,9 +1677,9 @@ mod tests {
         History, HistoryAction, Selection, display_ranges, highlight_rects, inverse, seam_gaps,
         three_fragment_selection, undo_range,
     };
+    use crate::view::EditRecord;
     use typors_core::Document;
     use typors_render::{ApproxMetrics, DocLayout, EditorTheme, LayoutMode};
-    use crate::view::EditRecord;
 
     fn layout(text: &str, mode: LayoutMode) -> (Document, DocLayout) {
         let doc = Document::parse(text);
@@ -1652,7 +1712,10 @@ mod tests {
         let copied = sel.text(&doc).expect("non-empty selection");
         // Continuous source bytes: the emphasis and code markers are part of it,
         // because the selection is a byte range of the buffer and nothing else.
-        assert!(copied.contains("**"), "copied {copied:?} lost the ** markers");
+        assert!(
+            copied.contains("**"),
+            "copied {copied:?} lost the ** markers"
+        );
         assert!(copied.contains('`'), "copied {copied:?} lost the backtick");
         assert_eq!(copied, doc.text()[sel.src_range()].to_string());
         assert!(!sel.is_reversed());

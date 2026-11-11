@@ -10,5 +10,5 @@ pub mod render;
 pub use render::{
     ApproxMetrics, BlockBox, BlockCache, BlockDecor, BlockMode, DocLayout, DrawSpan, EditorTheme,
     LayoutMode, MediaMeasures, Metrics, NoMedia, ObjectBox, ObjectHit, ObjectMetrics, RenderHit,
-    ShapeCache, Viewport, WindowMetrics, geometry_fingerprint, SOURCE_SPAN,
+    SOURCE_SPAN, ShapeCache, Viewport, WindowMetrics, geometry_fingerprint,
 };

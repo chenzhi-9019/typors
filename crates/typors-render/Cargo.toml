@@ -9,3 +9,4 @@ description = "typors render-projection geometry: blocks, fragments, hit testing
 [dependencies]
 gpui-kit.workspace = true
 typors-core = { path = "../typors-core" }
+typors-settings = { path = "../typors-settings" }

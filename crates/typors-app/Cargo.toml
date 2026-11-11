@@ -17,7 +17,3 @@ winresource = "0.1.23"
 [[bin]]
 name = "typors"
 path = "src/main.rs"
-
-[[bin]]
-name = "dump"
-path = "src/bin/dump.rs"

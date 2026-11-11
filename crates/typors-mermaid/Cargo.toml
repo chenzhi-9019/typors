@@ -1,0 +1,13 @@
+[package]
+name = "typors-mermaid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+description = "typors Mermaid renderer DLL (merman, lazy-loaded)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+merman = "=0.9.3"

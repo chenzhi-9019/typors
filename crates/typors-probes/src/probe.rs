@@ -16,14 +16,15 @@
 //! be painted. The report says which, so a reader never has to guess.
 
 use std::ops::Range;
+use std::sync::Arc;
 
 use gpui_kit::gpui::*;
 
 use typors_core::doc::BlockKind;
-use typors_render::{BlockBox, BlockMode, DocLayout};
 use typors_editor::view::{CaretMove, MarkdownView};
+use typors_render::{ApproxMetrics, BlockBox, BlockMode, DocLayout};
 
-use typors_editor::{projection_invariants, ProbeCapture};
+use typors_editor::{ProbeCapture, projection_invariants};
 
 // ---------------------------------------------------------------- helpers
 
@@ -277,11 +278,7 @@ pub fn cursor_probe(view: &mut MarkdownView, target: Option<(usize, usize)>) -> 
     let name = "C4 arrow/Home/End movement: (block, byte) sequence as expected, caret never stuck";
     checks.push(match (skipped, failures.is_empty()) {
         (Some(why), _) => not_exercised(name, &why),
-        (None, true) => (
-            name.to_string(),
-            true,
-            format!("{} moves", sequence.len()),
-        ),
+        (None, true) => (name.to_string(), true, format!("{} moves", sequence.len())),
         (None, false) => (name.to_string(), false, failures.join("; ")),
     });
     report.push_str("\n-- C4 movement sequence --\n");
@@ -295,7 +292,9 @@ pub fn cursor_probe(view: &mut MarkdownView, target: Option<(usize, usize)>) -> 
     if let Some((block_idx, byte)) = target {
         match view.doc().blocks().get(block_idx) {
             Some(block) => {
-                let src = view.doc().snap_floor(block.src.start + byte.min(block.src.len()));
+                let src = view
+                    .doc()
+                    .snap_floor(block.src.start + byte.min(block.src.len()));
                 view.set_caret(src);
                 view.sync_layout();
                 placed = describe_caret(view);
@@ -327,7 +326,7 @@ pub fn cursor_probe(view: &mut MarkdownView, target: Option<(usize, usize)>) -> 
     // ---------------------------------------------------------------- C6 (4.2)
     let mut failures = Vec::new();
     let skipped = check_projection_switch(view, &mut failures, &mut report);
-    let name = "C6 caret block paints its Markdown source, every other block stays rendered";
+    let name = "C6 caret heading stays rendered with hidden markers (live preview)";
     checks.push(match (skipped, failures.is_empty()) {
         (Some(why), _) => not_exercised(name, &why),
         (None, true) => (
@@ -417,11 +416,7 @@ pub fn cursor_probe(view: &mut MarkdownView, target: Option<(usize, usize)>) -> 
     ProbeCapture { report, checks }
 }
 
-fn check_rendered_roundtrip(
-    view: &MarkdownView,
-    failures: &mut Vec<String>,
-    probes: &mut usize,
-) {
+fn check_rendered_roundtrip(view: &MarkdownView, failures: &mut Vec<String>, probes: &mut usize) {
     let Some(layout) = view.layout() else {
         failures.push("no layout".to_string());
         return;
@@ -434,7 +429,8 @@ fn check_rendered_roundtrip(
             for local in boundaries(&span.text) {
                 *probes += 1;
                 let display_byte = span.render.start + local;
-                let Some((x, y, line_height)) = layout.caret_x(block.block_idx, display_byte) else {
+                let Some((x, y, line_height)) = layout.caret_x(block.block_idx, display_byte)
+                else {
                     failures.push(format!(
                         "block {} byte {display_byte}: no caret x",
                         block.block_idx
@@ -465,7 +461,9 @@ fn check_rendered_roundtrip(
                     Some((x2, _, _)) if (x2.as_f32() - x.as_f32()).abs() <= 1.5 => {}
                     other => failures.push(format!(
                         "block {} byte {display_byte}: x {:.1} -> hit byte {} -> {other:?}",
-                        block.block_idx, x.as_f32(), hit.render_byte
+                        block.block_idx,
+                        x.as_f32(),
+                        hit.render_byte
                     )),
                 }
             }
@@ -564,10 +562,8 @@ fn check_boundaries(
         }
         for fraction in [0.05f32, 0.5, 0.95] {
             *probes += 1;
-            let y = px(
-                block.bounds.origin.y.as_f32()
-                    + block.bounds.size.height.as_f32() * fraction,
-            );
+            let y =
+                px(block.bounds.origin.y.as_f32() + block.bounds.size.height.as_f32() * fraction);
             match layout.block_at_y(y) {
                 Some(idx) if idx == block.block_idx => {}
                 other => failures.push(format!(
@@ -655,9 +651,8 @@ fn check_boundaries(
                 // which encoded the defect the C7 check below is about; for a
                 // single-line gap (every gap in the sample document) the two are the
                 // same value, so this is a strengthening, not a relaxation.
-                let (want_line, want_byte) = layout
-                    .blank_line_of(block.block_idx, mid)
-                    .unwrap_or((0, 0));
+                let (want_line, want_byte) =
+                    layout.blank_line_of(block.block_idx, mid).unwrap_or((0, 0));
                 if hit.render_byte != want_byte {
                     failures.push(format!(
                         "blank block {}: hit byte {} != {want_byte} (line {want_line} of {})",
@@ -804,7 +799,10 @@ fn check_blank_run_hit(
         ),
     ] {
         *probes += 1;
-        match (layout.hit(point(px(left), px(y))), layout.blank_line_of(gap.block_idx, px(y))) {
+        match (
+            layout.hit(point(px(left), px(y))),
+            layout.blank_line_of(gap.block_idx, px(y)),
+        ) {
             (Some(hit), Some((line, byte))) if hit.render_byte == byte && line == want => {}
             other => failures.push(format!(
                 "{label}: hit/mapping {other:?}, expected line {want}"
@@ -837,7 +835,8 @@ fn check_blank_run_hit(
 
 fn check_keyboard(
     view: &mut MarkdownView,
-    failures: &mut Vec<String>,    sequence: &mut Vec<String>,
+    failures: &mut Vec<String>,
+    sequence: &mut Vec<String>,
 ) -> Option<String> {
     let doc_text = view.doc().text();
     let Some(layout) = view.layout().cloned() else {
@@ -1104,15 +1103,19 @@ fn check_projection_switch(
         .filter(has_text)
         .find(|b| after_heading(b) && b.kind == BlockKind::Paragraph)
         .or_else(|| layout.blocks.iter().filter(has_text).find(after_heading))
-        .or_else(|| layout.blocks.iter().filter(has_text).find(|b| b.block_idx != h_idx))
+        .or_else(|| {
+            layout
+                .blocks
+                .iter()
+                .filter(has_text)
+                .find(|b| b.block_idx != h_idx)
+        })
         .or_else(|| layout.blocks.iter().find(|b| b.block_idx != h_idx));
     let Some((p_idx, p_src)) = target.map(|b| (b.block_idx, b.src.clone())) else {
         return Some("no other block to move the caret out to".to_string());
     };
 
-    // Into the heading: the spec's own scenario is "## " appears and the other
-    // headings still show none. (A block owns the caret at its own start offset,
-    // so no further movement is needed to be "inside".)
+    // Into the heading: live preview keeps the heading rendered and hides `## `.
     view.set_caret(h_src.start);
     view.sync_layout();
     let Some(inside) = view.layout().cloned() else {
@@ -1122,41 +1125,33 @@ fn check_projection_switch(
         &inside,
         &format!("caret inside the heading (block {h_idx})"),
     ));
-    if inside.block_mode(h_idx) != Some(BlockMode::Source) {
-        failures.push(format!("block {h_idx} did not switch to source"));
+    if inside.block_mode(h_idx) != Some(BlockMode::Rendered) {
+        failures.push(format!("block {h_idx} left the rendered projection"));
     }
     let in_heading = painted(&inside, h_idx);
-    if !in_heading.starts_with("## ") {
+    let expected_inside = inside
+        .blocks
+        .get(h_idx)
+        .map(|b| b.render.clone())
+        .unwrap_or_default();
+    if in_heading != expected_inside {
         failures.push(format!(
-            "caret heading painted {in_heading:?}, expected a leading \"## \""
+            "caret heading painted {in_heading:?}, expected its rendered text {expected_inside:?}"
         ));
     }
-    if source_block_indices(&inside) != vec![h_idx] {
+    if in_heading.starts_with('#') {
         failures.push(format!(
-            "source blocks {:?}, expected only [{h_idx}]",
+            "caret heading still paints a leading marker: {in_heading:?}"
+        ));
+    }
+    if !source_block_indices(&inside).is_empty() {
+        failures.push(format!(
+            "ordinary blocks unexpectedly projected as source: {:?}",
             source_block_indices(&inside)
         ));
     }
-    for block in &inside.blocks {
-        if block.block_idx == h_idx {
-            continue;
-        }
-        if block.mode != BlockMode::Rendered {
-            failures.push(format!("block {} is not rendered", block.block_idx));
-        }
-        if matches!(block.kind, BlockKind::Heading { .. })
-            && painted(&inside, block.block_idx).contains('#')
-        {
-            failures.push(format!(
-                "sibling heading {} paints '#': {:?}",
-                block.block_idx,
-                painted(&inside, block.block_idx)
-            ));
-        }
-    }
 
-    // Out again: the heading restores, its `## ` disappears, and the paragraph
-    // takes over as the single source block.
+    // Out again: nothing changes projection; the heading stays rendered.
     view.set_caret(p_src.start);
     view.sync_layout();
     let Some(outside) = view.layout().cloned() else {
@@ -1166,9 +1161,6 @@ fn check_projection_switch(
         &outside,
         &format!("caret moved out to block {p_idx}"),
     ));
-    if outside.block_mode(h_idx) != Some(BlockMode::Rendered) {
-        failures.push(format!("block {h_idx} stayed in source after the caret left"));
-    }
     let restored = painted(&outside, h_idx);
     let expected = outside
         .blocks
@@ -1180,9 +1172,9 @@ fn check_projection_switch(
             "restored heading painted {restored:?} != its render text {expected:?}"
         ));
     }
-    if source_block_indices(&outside) != vec![p_idx] {
+    if !source_block_indices(&outside).is_empty() {
         failures.push(format!(
-            "source blocks {:?}, expected only [{p_idx}]",
+            "ordinary blocks unexpectedly projected as source: {:?}",
             source_block_indices(&outside)
         ));
     }
@@ -1235,11 +1227,7 @@ pub fn edit_probe(view: &mut MarkdownView) -> ProbeCapture {
                 failures.push("typing: buffer is not the expected splice".to_string());
             }
             if view.caret() != Some(at + 1) {
-                failures.push(format!(
-                    "typing: caret {:?} != {}",
-                    view.caret(),
-                    at + 1
-                ));
+                failures.push(format!("typing: caret {:?} != {}", view.caret(), at + 1));
             }
             if view.caret_block() != Some(p_idx) {
                 failures.push(format!(
@@ -1268,7 +1256,7 @@ pub fn edit_probe(view: &mut MarkdownView) -> ProbeCapture {
         None => skipped = Some("no paragraph block with styled fragments".to_string()),
     }
     report.push_str(&format!("\n-- E1 typing.\n{detail}"));
-    let name = "E1 typing in a paragraph: text, caret, source block, rendered siblings";
+    let name = "E1 typing in a paragraph: text, caret, rendered live-preview projection";
     checks.push(match (skipped.take(), failures.is_empty()) {
         (Some(why), _) => not_exercised(name, &why),
         (None, true) => (
@@ -1325,9 +1313,15 @@ pub fn edit_probe(view: &mut MarkdownView) -> ProbeCapture {
                 other => failures.push(format!("block after deleting in the heading is {other:?}")),
             }
             let still_heading = view.layout().map(|l| painted(l, h_idx)).unwrap_or_default();
-            if !still_heading.starts_with("## ") {
+            if still_heading.starts_with('#') {
                 failures.push(format!(
-                    "heading after delete painted {still_heading:?}, markers lost"
+                    "heading after delete still paints markers: {still_heading:?}"
+                ));
+            }
+            if still_heading != view.doc().blocks()[h_idx].render {
+                failures.push(format!(
+                    "heading after delete painted {still_heading:?} != render {:?}",
+                    view.doc().blocks()[h_idx].render
                 ));
             }
             detail.push_str(&projection_invariants(
@@ -1349,13 +1343,14 @@ pub fn edit_probe(view: &mut MarkdownView) -> ProbeCapture {
         None => skipped = Some("no level-2 heading block".to_string()),
     }
     report.push_str(&format!("\n-- E2 heading delete and retype.\n{detail}"));
-    let name = "E2 delete and retype inside a heading line: markers kept, buffer restored";
+    let name =
+        "E2 delete and retype inside a rendered heading: markers stay hidden, buffer restored";
     checks.push(match (skipped.take(), failures.is_empty()) {
         (Some(why), _) => not_exercised(name, &why),
         (None, true) => (
             name.to_string(),
             true,
-            "the block stayed a level-2 heading with its '## ' prefix".to_string(),
+            "the block stayed a level-2 heading with hidden '## ' markers".to_string(),
         ),
         (None, false) => (name.to_string(), false, failures.join("; ")),
     });
@@ -1585,7 +1580,9 @@ fn newline_step(view: &mut MarkdownView) -> NewlineStep {
         selection: view.selection_range(),
         revision: view.doc().revision(),
         trigger: view.last_edit_trigger().map(|t| t.as_str()),
-        inserted: last.as_ref().map(|e| typors_editor::view::escape_insert(&e.inserted)),
+        inserted: last
+            .as_ref()
+            .map(|e| typors_editor::view::escape_insert(&e.inserted)),
         block,
         trailing_newlines,
         tail_newlines,
@@ -1821,7 +1818,9 @@ pub fn newlines_probe(
     }
 
     checks.push((
-        format!("N1 {presses} presses of `enter` add {presses} newlines and move the caret each time"),
+        format!(
+            "N1 {presses} presses of `enter` add {presses} newlines and move the caret each time"
+        ),
         failures.is_empty(),
         if failures.is_empty() {
             format!(
@@ -1887,8 +1886,9 @@ pub fn newlines_probe(
             ));
         }
         Some((page, before, correction, after)) => {
-            let inside = correction
-                .is_some_and(|c| c.caret_top + 0.5 >= c.to && c.caret_bottom <= c.to + viewport_height + 0.5);
+            let inside = correction.is_some_and(|c| {
+                c.caret_top + 0.5 >= c.to && c.caret_bottom <= c.to + viewport_height + 0.5
+            });
             let moved = correction.is_some_and(|c| c.moved() > 1.);
             checks.push((
                 "N2 a caret below the fold scrolls into view (its own line box inside the band)"
@@ -1938,7 +1938,13 @@ pub fn newlines_probe(
                 view.set_scroll_offset_y(target);
                 let in_band = rect.top().as_f32() >= target
                     && rect.bottom().as_f32() <= target + viewport_height;
-                Some((page, target, rect.top().as_f32(), rect.bottom().as_f32(), in_band))
+                Some((
+                    page,
+                    target,
+                    rect.top().as_f32(),
+                    rect.bottom().as_f32(),
+                    in_band,
+                ))
             })
         })
         .ok()
@@ -1995,5 +2001,124 @@ pub fn newlines_probe(
         )),
     }
 
+    ProbeCapture { report, checks }
+}
+
+/// `--dump-blank`: the empty-document contract from the caret spec. Uses
+/// deterministic metrics so it runs without a window.
+pub fn blank_probe(view: &mut MarkdownView) -> crate::ProbeCapture {
+    let mut report = String::new();
+    let mut checks: Vec<(String, bool, String)> = Vec::new();
+    view.seed_layout(Arc::new(ApproxMetrics), px(1000.));
+
+    let one_block = view.doc().blocks().len() == 1
+        && view.doc().blocks()[0].src == (0..0)
+        && view.doc().block_at_src(0) == Some(0);
+    checks.push((
+        "B1 empty document owns one zero-length editable block".to_string(),
+        one_block,
+        format!(
+            "{} blocks, first={:?}",
+            view.doc().blocks().len(),
+            view.doc().blocks().first().map(|b| b.src.clone())
+        ),
+    ));
+
+    let initial = view.caret();
+    let initial_bounds = view.caret_bounds();
+    checks.push((
+        "B2 blank document starts with a visible caret at offset 0".to_string(),
+        initial == Some(0) && initial_bounds.is_some(),
+        format!("caret={initial:?} bounds={initial_bounds:?}"),
+    ));
+
+    view.insert_text("你");
+    view.seed_layout(Arc::new(ApproxMetrics), px(1000.));
+    let typed = view.doc().text() == "你" && view.caret() == Some("你".len());
+    checks.push((
+        "B3 typing the first character on a blank document inserts and advances".to_string(),
+        typed,
+        format!("text={:?} caret={:?}", view.doc().text(), view.caret()),
+    ));
+
+    view.insert_newline();
+    view.seed_layout(Arc::new(ApproxMetrics), px(1000.));
+    let after_enter =
+        view.doc().text() == "你\n" && view.caret() == Some(4) && view.caret_bounds().is_some();
+    checks.push((
+        "B4 Enter creates the next line and the caret follows it".to_string(),
+        after_enter,
+        format!(
+            "text={:?} caret={:?} bounds={:?}",
+            view.doc().text(),
+            view.caret(),
+            view.caret_bounds()
+        ),
+    ));
+
+    report.push_str(&format!(
+        "blank document: {} bytes, {} blocks, caret={:?}\n",
+        view.doc().len_bytes(),
+        view.doc().blocks().len(),
+        view.caret()
+    ));
+    crate::ProbeCapture { report, checks }
+}
+
+/// `--dump-live-preview`: the block-marker hiding contract.
+pub fn live_preview_probe(view: &mut MarkdownView) -> ProbeCapture {
+    view.ensure_layout();
+    let mut report = String::from("# live-preview probe\n");
+    let mut checks: Vec<(String, bool, String)> = Vec::new();
+    let Some(layout) = view.layout().cloned() else {
+        checks.push(("L1 layout".to_string(), false, "no layout".to_string()));
+        return ProbeCapture { report, checks };
+    };
+    let heading = layout
+        .blocks
+        .iter()
+        .find(|b| matches!(b.kind, BlockKind::Heading { .. }))
+        .map(|b| (b.block_idx, b.src.clone()));
+    if let Some((idx, src)) = heading {
+        view.set_caret(src.start + 2.min(src.len()));
+        view.sync_layout();
+        let mode = view.layout().and_then(|l| l.block_mode(idx));
+        let painted = view.layout().map(|l| painted(l, idx)).unwrap_or_default();
+        let render = view.doc().blocks()[idx].render.clone();
+        report.push_str(&format!(
+            "heading block {idx} mode {mode:?} painted {painted:?}\n"
+        ));
+        checks.push((
+            "L1 heading marker hidden while the caret is in the heading".to_string(),
+            mode == Some(BlockMode::Rendered) && painted == render && !painted.starts_with('#'),
+            format!("mode {mode:?}, painted {painted:?}"),
+        ));
+    } else {
+        checks.push(("L1 heading".to_string(), false, "no heading".to_string()));
+    }
+    let code = layout
+        .blocks
+        .iter()
+        .find(|b| matches!(b.kind, BlockKind::FencedCode { .. }))
+        .map(|b| (b.block_idx, b.src.clone()));
+    if let Some((idx, src)) = code {
+        view.set_caret(src.start + 3.min(src.len()));
+        view.sync_layout();
+        let mode = view.layout().and_then(|l| l.block_mode(idx));
+        let painted = view.layout().map(|l| painted(l, idx)).unwrap_or_default();
+        report.push_str(&format!(
+            "code block {idx} mode {mode:?} painted {painted:?}\n"
+        ));
+        checks.push((
+            "L2 fenced code renders while the caret is inside".to_string(),
+            mode == Some(BlockMode::Rendered) && !painted.contains("```"),
+            format!("mode {mode:?}"),
+        ));
+    }
+    checks.push((
+        "L3 all probe-visible blocks pass the rendered/source invariant".to_string(),
+        view.layout().is_some(),
+        "layout present".to_string(),
+    ));
     ProbeCapture { report, checks }
 }

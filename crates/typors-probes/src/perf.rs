@@ -27,12 +27,10 @@
 //! per-frame `draw` duration and phase split afterwards, next to the numbers
 //! above.
 
-
-
 use gpui_kit::gpui::*;
 
-use typors_render::{geometry_fingerprint, DocLayout, LayoutMode};
 use typors_editor::view::{CULL_MARGIN, MarkdownView};
+use typors_render::{DocLayout, LayoutMode, geometry_fingerprint};
 
 /// How many scroll stops the sweep takes. Enough to cover the whole document at
 /// roughly one page per two stops on a 100k-character file.
@@ -150,7 +148,8 @@ pub fn perf_probe(view: &mut MarkdownView, window: &mut Window) -> PerfCapture {
 
     let Some(metrics) = view.frame_metrics() else {
         return PerfCapture {
-            report: "-- perf --\n   no frame metrics: the probe needs a painted frame\n".to_string(),
+            report: "-- perf --\n   no frame metrics: the probe needs a painted frame\n"
+                .to_string(),
             checks: vec![(
                 "P0 a painted frame measured the document".to_string(),
                 false,
@@ -460,7 +459,10 @@ pub fn perf_probe(view: &mut MarkdownView, window: &mut Window) -> PerfCapture {
 
     // A1–A5 on a layout produced through the caches: the marker-free / projection
     // checks still hold when the block cache supplies the geometry.
-    let cached_checks = view.layout().map(|l| l.checks(view.doc())).unwrap_or_default();
+    let cached_checks = view
+        .layout()
+        .map(|l| l.checks(view.doc()))
+        .unwrap_or_default();
     let p6_bad: Vec<String> = cached_checks
         .iter()
         .filter(|(_, ok, _)| !ok)
@@ -506,26 +508,35 @@ pub fn perf_probe(view: &mut MarkdownView, window: &mut Window) -> PerfCapture {
     // a culled frame must produce the same highlight as an uncropped one.
     let sel = {
         let len = view.doc().len_bytes();
-        Some(typors_editor::selection::Selection::new(len.saturating_sub(200).min(len), len))
+        Some(typors_editor::selection::Selection::new(
+            len.saturating_sub(200).min(len),
+            len,
+        ))
     };
     let p8_details = match sel {
         None => ("no selection".to_string(), false),
         Some(selection) => {
             let _ = view.perf_frame(metrics.clone(), width, viewport_height, max_scroll, true);
             let culled_rects = uncropped_selection_rects(view, &selection);
-            let uncropped_rects = typors_editor::selection::selection_rects(view.doc(), &uncropped, &selection);
+            let uncropped_rects =
+                typors_editor::selection::selection_rects(view.doc(), &uncropped, &selection);
             let same = culled_rects.len() == uncropped_rects.len()
-                && culled_rects.iter().zip(uncropped_rects.iter()).all(|(a, b)| {
-                    (a.left - b.left).abs() < 0.01
-                        && (a.right - b.right).abs() < 0.01
-                        && (a.line_top - b.line_top).abs() < 0.01
-                });
+                && culled_rects
+                    .iter()
+                    .zip(uncropped_rects.iter())
+                    .all(|(a, b)| {
+                        (a.left - b.left).abs() < 0.01
+                            && (a.right - b.right).abs() < 0.01
+                            && (a.line_top - b.line_top).abs() < 0.01
+                    });
             let gaps = typors_editor::selection::seam_gaps(&uncropped_rects);
             (
                 format!(
                     "{} rects, same as the uncropped layout: {same}; seam gaps {:?}",
                     uncropped_rects.len(),
-                    gaps.iter().map(|g| (g * 10.).round() / 10.).collect::<Vec<_>>()
+                    gaps.iter()
+                        .map(|g| (g * 10.).round() / 10.)
+                        .collect::<Vec<_>>()
                 ),
                 same,
             )

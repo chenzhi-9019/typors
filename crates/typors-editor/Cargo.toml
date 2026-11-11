@@ -12,3 +12,5 @@ gpui-kit.workspace = true
 typors-core = { path = "../typors-core" }
 typors-media = { path = "../typors-media" }
 typors-render = { path = "../typors-render" }
+typors-settings = { path = "../typors-settings" }
+libloading = "0.8.9"

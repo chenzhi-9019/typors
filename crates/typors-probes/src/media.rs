@@ -1,9 +1,9 @@
 //! `--dump-media`: what the frame actually did with images and formulas.
 
 use typors_core::doc::ObjectKind;
+use typors_editor::ProbeCapture;
 use typors_editor::media::ImageState;
 use typors_editor::view::MarkdownView;
-use typors_editor::ProbeCapture;
 
 /// Inspect the objects of the last painted frame and return a transcript plus
 /// pass/fail checks. Runs inside `paint`, after the layout was published.
@@ -33,27 +33,31 @@ pub fn media_probe(view: &MarkdownView) -> ProbeCapture {
                 .unwrap_or_default()
                 .to_string();
             let state = match &object.kind {
-                ObjectKind::Image { destination, .. } => match view.media().image_state(destination) {
-                    ImageState::Ready { width, height, .. } => {
-                        ready_images += 1;
-                        format!("ready {width:.0}x{height:.0}")
+                ObjectKind::Image { destination, .. } => {
+                    match view.media().image_state(destination) {
+                        ImageState::Ready { width, height, .. } => {
+                            ready_images += 1;
+                            format!("ready {width:.0}x{height:.0}")
+                        }
+                        ImageState::Pending => "pending".to_string(),
+                        ImageState::Failed(reason) => {
+                            failed += 1;
+                            format!("failed: {reason}")
+                        }
                     }
-                    ImageState::Pending => "pending".to_string(),
-                    ImageState::Failed(reason) => {
-                        failed += 1;
-                        format!("failed: {reason}")
+                }
+                ObjectKind::Math { tex, .. } => {
+                    match view.media().math().svg(tex, object.font_size.as_f32()) {
+                        Ok(_) => {
+                            math_ok += 1;
+                            "typeset".to_string()
+                        }
+                        Err(error) => {
+                            failed += 1;
+                            format!("math error: {error}")
+                        }
                     }
-                },
-                ObjectKind::Math { tex, .. } => match view.media().math().svg(tex, object.font_size.as_f32()) {
-                    Ok(_) => {
-                        math_ok += 1;
-                        "typeset".to_string()
-                    }
-                    Err(error) => {
-                        failed += 1;
-                        format!("math error: {error}")
-                    }
-                },
+                }
                 ObjectKind::Diagram { source } => match view.media().diagram(source) {
                     Ok(diagram) => {
                         diagrams += 1;
@@ -62,6 +66,16 @@ pub fn media_probe(view: &MarkdownView) -> ProbeCapture {
                     Err(error) => {
                         failed += 1;
                         format!("mermaid error: {error}")
+                    }
+                },
+                ObjectKind::Chart { source } => match view.media().chart(source) {
+                    Ok(chart) => {
+                        diagrams += 1;
+                        format!("chart {:.0}x{:.0}", chart.width, chart.height)
+                    }
+                    Err(error) => {
+                        failed += 1;
+                        format!("chart error: {error}")
                     }
                 },
             };
@@ -81,11 +95,17 @@ pub fn media_probe(view: &MarkdownView) -> ProbeCapture {
 
             // M1: the placeholder owns exactly one char, and the object's source
             // range round-trips through both projections.
-            if let Some(span) = block.spans.iter().find(|span| span.span_idx == object.span_idx) {
+            if let Some(span) = block
+                .spans
+                .iter()
+                .find(|span| span.span_idx == object.span_idx)
+            {
                 if &block.render[span.render.clone()] != "\u{FFFC}" {
                     failures.push(format!(
                         "block {} span {}: object placeholder is {:?}",
-                        block.block_idx, object.span_idx, &block.render[span.render.clone()]
+                        block.block_idx,
+                        object.span_idx,
+                        &block.render[span.render.clone()]
                     ));
                 }
                 for src in object.source.start..=object.source.end {
@@ -101,7 +121,10 @@ pub fn media_probe(view: &MarkdownView) -> ProbeCapture {
                         break;
                     }
                 }
-            } else if !matches!(&object.kind, ObjectKind::Image { .. } | ObjectKind::Math { .. }) {
+            } else if !matches!(
+                &object.kind,
+                ObjectKind::Image { .. } | ObjectKind::Math { .. }
+            ) {
                 failures.push(format!(
                     "block {} object span {} has no span table entry",
                     block.block_idx, object.span_idx
@@ -111,9 +134,8 @@ pub fn media_probe(view: &MarkdownView) -> ProbeCapture {
             // M2: a ready image keeps its aspect ratio and never exceeds the
             // column. A placeholder is allowed to be the fixed 320x180 box.
             if let ObjectKind::Image { destination, .. } = &object.kind
-                && let ImageState::Ready {
-                    width, height, ..
-                } = view.media().image_state(destination)
+                && let ImageState::Ready { width, height, .. } =
+                    view.media().image_state(destination)
             {
                 let expected_ratio = width / height;
                 let actual_ratio =
@@ -127,7 +149,9 @@ pub fn media_probe(view: &MarkdownView) -> ProbeCapture {
                 if object.bounds.size.width.as_f32() > content_width + 0.5 {
                     failures.push(format!(
                         "block {} image wider than the column: {} > {}",
-                        block.block_idx, object.bounds.size.width.as_f32(), content_width
+                        block.block_idx,
+                        object.bounds.size.width.as_f32(),
+                        content_width
                     ));
                 }
             }
@@ -140,7 +164,8 @@ pub fn media_probe(view: &MarkdownView) -> ProbeCapture {
                 if (object.bounds.size.height.as_f32() - expected_height).abs() > 1.0 {
                     failures.push(format!(
                         "block {} math height {} != {expected_height}",
-                        block.block_idx, object.bounds.size.height.as_f32()
+                        block.block_idx,
+                        object.bounds.size.height.as_f32()
                     ));
                 }
             }
@@ -155,12 +180,16 @@ pub fn media_probe(view: &MarkdownView) -> ProbeCapture {
 
     checks.push((
         "M1 objects have one-char placeholders and lossless source mapping".to_string(),
-        failures.iter().all(|f| !f.contains("placeholder") && !f.contains("round-trip")),
+        failures
+            .iter()
+            .all(|f| !f.contains("placeholder") && !f.contains("round-trip")),
         format!("{total} objects"),
     ));
     checks.push((
         "M2 ready images preserve aspect ratio and stay within the column".to_string(),
-        failures.iter().all(|f| !f.contains("aspect") && !f.contains("wider")),
+        failures
+            .iter()
+            .all(|f| !f.contains("aspect") && !f.contains("wider")),
         format!("{ready_images} ready images"),
     ));
     checks.push((
@@ -173,13 +202,14 @@ pub fn media_probe(view: &MarkdownView) -> ProbeCapture {
         !block_objects_without_bounds(layout),
         format!("{failed} failed objects"),
     ));
+    let minimum = ready_images + math_ok;
+    let maximum = minimum + diagrams;
     checks.push((
-        "M5 every ready/typeset object produced a paint command".to_string(),
-        view.painted_objects() >= ready_images + math_ok + diagrams,
+        "M5 every visible ready/typeset object produced a paint command".to_string(),
+        view.painted_objects() >= minimum && view.painted_objects() <= maximum,
         format!(
-            "{} commands, {} expected",
+            "{} commands, visible minimum {minimum}, upper bound {maximum} (off-screen diagrams are culled)",
             view.painted_objects(),
-            ready_images + math_ok + diagrams
         ),
     ));
 
@@ -192,6 +222,7 @@ fn kind_label(kind: &ObjectKind) -> &'static str {
         ObjectKind::Math { display: true, .. } => "display-math",
         ObjectKind::Math { display: false, .. } => "inline-math",
         ObjectKind::Diagram { .. } => "diagram",
+        ObjectKind::Chart { .. } => "chart",
     }
 }
 
@@ -212,5 +243,8 @@ fn finish(
     for failure in &failures {
         text.push_str(&format!("  [detail] {failure}\n"));
     }
-    ProbeCapture { report: text, checks }
+    ProbeCapture {
+        report: text,
+        checks,
+    }
 }

@@ -15,13 +15,14 @@ buffer is the only truth; the two projections are views of it.
 | `crates/typors-editor` | Self-drawn GPUI `Element`, caret, input/IME, selection, undo |
 | `crates/typors-probes` | `--dump-*` probes and the frame-cost sweep |
 | `crates/typors-runtime` | `cdylib`: window, modes, shell registration (the bulk of the program) |
-| `crates/typors-app` | Tiny loader `typors.exe` + the `dump` inspection binary |
-| `crates/typors-spike` | M0 research record; independent regression reference |
+| `crates/typors-app` | Tiny loader `typors.exe` |
 | `assets/` | Runtime resources (icon, sample image) — not embedded in the EXE |
 | `packaging/` | NSIS installer (`typors.nsi`) |
 
-`typors.exe` loads `typors_runtime.dll` from its own directory. The DLL owns GPUI,
-the editor and the first-run shell registration; the EXE only calls its
+`typors.exe` loads `typors_runtime.dll` from its own directory. Mermaid lives in a
+second lazy-loaded `typors_mermaid.dll`: the runtime DLL is ~16 MB and Mermaid's
+28 MB only maps when a document actually contains a Mermaid fence. The DLL owns
+GPUI, the editor and the first-run shell registration; the EXE only calls its
 `typors_run` export. That is what keeps the EXE around 145 KB.
 
 ## Build
@@ -36,6 +37,7 @@ The executable and DLL must stay side by side:
 ```text
 target\release\typors.exe
 target\release\typors_runtime.dll
+target\release\typors_mermaid.dll
 ```
 
 ## Running
@@ -52,12 +54,31 @@ and assert their checks. Exit code 0 means every check passed.
 | --- | --- |
 | `--dump-layout` | Block boxes, painted fragments, objects, A1–A5 |
 | `--dump-media` | Image/math/table objects, source mapping, M1–M5 |
+| `--dump-live-preview` | Heading/code marker hiding and rendered projection (L1–L3) |
 | `--dump-cursor` | Caret, hit testing, keyboard movement (C1–C6) |
 | `--dump-edit` | Typing/deleting (E1–E4) |
 | `--dump-ime` | Input-method callback sequence (I0–I8) |
 | `--dump-select` | Selection, clipboard, undo (S1–S9) |
 | `--dump-newlines` | Enter/newline handling (N0–N6) |
 | `--dump-perf` | Frame-cost sweep (P0–P9) |
+| `--dump-blank` | Empty-document block/caret/typing/Enter contract (B1–B4); no file argument |
+| `--dump-menu` | Menu model labels, item order and commands |
+
+## Menu bar
+
+The window has a GPUI-drawn menu row above the scrolling page:
+`文件(F) / 编辑(E) / 段落(P) / 格式(O) / 视图(V) / 主题(T) / 帮助(H)`.
+
+- Click a label or press `Alt+F/E/P/O/V/T/H` to open it.
+- `←/→` switch menus, `↑/↓` move the highlight (disabled items are skipped),
+  `Enter` runs, `Esc` closes and returns focus to the editor.
+- 文件: New `Ctrl+N`, Open `Ctrl+O`, Save `Ctrl+S`, Save As `Ctrl+Shift+S`, Exit.
+- 编辑 and 段落/格式 commands run through the same editor entry points as their
+  keyboard shortcuts, so undo/redo, selection and IME stay consistent.
+
+An empty startup (running `typors` without a file) is a real editable document:
+there is one empty paragraph, the caret is at offset 0, and click/type/Enter/IME
+work without a prior click.
 
 ## Rich content
 
@@ -70,6 +91,11 @@ and assert their checks. Exit code 0 means every check passed.
 - Strikethrough `~~...~~`.
 - Inline HTML subset: `<b>/<strong>`, `<i>/<em>`, `<code>/<kbd>/<samp>`,
   `<s>/<del>`, `<a>` and `<br>`.
+- **Charts**: fenced ```` ```chart ```` blocks render native SVG charts (pie, line,
+  bar, scatter) with Matplotlib-style `series: values` and `series.option: value`
+  definitions. See [docs/chart.md](docs/chart.md).
+- **Automatic TOC**: a standalone `[toc]` line expands to the document's heading
+  outline at render time; the marker stays editable when the caret is on it.
 - **Mermaid**: fenced ```` ```mermaid ```` blocks render natively through
   [merman](https://github.com/Latias94/merman), a headless Rust Mermaid
   implementation (no WebView, no Node). All Mermaid diagram families compiled by
@@ -139,7 +165,17 @@ All are debug/probe hooks; none is needed to use the editor.
 0.13.5`, `ropey 2.0.0-beta.1`, `ratex-* 0.1.15`, `merman 0.9.3`, `base64 0.22.1`,
 `winreg 0.56.0`. Versions are pinned in the workspace `Cargo.toml`.
 
-## Relation to `spike/`
+## History
 
-`crates/typors-spike` is the M0 feasibility probe kept as a research record and
-an independent regression reference. It does not depend on the product crates.
+The M0 feasibility spike was a separate `typors-spike` crate during development.
+It has been removed: `typors` now has one executable and the probes in
+`crates/typors-probes` cover the regression surface the spike used to guard.
+
+## Live preview
+
+Typing `# ` / `## ` / `- ` / `1. ` / `> ` hides the marker immediately and keeps
+the line rendered while the caret stays in it. Fenced code blocks render their
+plate and content while editing. `chart` / `mermaid` fences stay as source while
+the caret is inside and render only after the caret leaves. The caret mapping
+and A5/C6/E/S/I probes were updated for this contract; inline emphasis markers
+still always hide (caret-local reveal is tracked separately).

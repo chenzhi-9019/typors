@@ -79,7 +79,10 @@ fn inline(rng: &mut Lcg) -> String {
         4 => format!("[{}](https://example.com/路径)", word(rng)),
         5 => format!("\\*{}", word(rng)),
         6 => format!("{}  \n{}", word(rng), word(rng)),
-        7 => format!("${}$", rng.pick(&["x^2", "\\frac{a}{b}", "\\sum_i i", "\\alpha + \\beta"])),
+        7 => format!(
+            "${}$",
+            rng.pick(&["x^2", "\\frac{a}{b}", "\\sum_i i", "\\alpha + \\beta"])
+        ),
         8 => format!("![图{}](assets/pic{}.png)", rng.below(3), rng.below(3)),
         9 => format!("$${}$$", rng.pick(&["x^2 + y^2", "\\int_0^1 x\\,dx"])),
         10 => format!("![图](https://example.com/{})", word(rng)),
@@ -135,7 +138,11 @@ fn list(rng: &mut Lcg) -> String {
 }
 
 fn heading(rng: &mut Lcg) -> String {
-    format!("{} {}\n", "#".repeat(1 + rng.below(3) as usize), sentence(rng, 2))
+    format!(
+        "{} {}\n",
+        "#".repeat(1 + rng.below(3) as usize),
+        sentence(rng, 2)
+    )
 }
 
 /// One mixed Markdown document, built from the six block categories plus blank

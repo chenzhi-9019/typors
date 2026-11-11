@@ -8,7 +8,6 @@ description = "typors rich-content engines: image sources and RaTeX math typeset
 
 [dependencies]
 base64.workspace = true
-merman = "=0.9.3"
 ratex-layout.workspace = true
 ratex-parser.workspace = true
 ratex-svg.workspace = true

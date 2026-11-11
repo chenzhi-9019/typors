@@ -49,7 +49,11 @@ impl MarkedText {
     /// Where the IME cursor sits, in composite bytes: `GCS_CURSORPOS` when the
     /// platform sent one, otherwise the end of the string.
     pub fn composite_caret(&self) -> usize {
-        self.anchor + self.selection.as_ref().map_or(self.len(), |s| s.end.min(self.len()))
+        self.anchor
+            + self
+                .selection
+                .as_ref()
+                .map_or(self.len(), |s| s.end.min(self.len()))
     }
 
     /// Splice the composition into one block's buffer slice.

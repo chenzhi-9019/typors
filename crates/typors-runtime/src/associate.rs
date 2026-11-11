@@ -8,11 +8,9 @@
 use std::path::Path;
 use std::process::Command;
 
+use windows_sys::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONQUESTION, MB_YESNO, MessageBoxW};
 use winreg::RegKey;
 use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
-use windows_sys::Win32::UI::WindowsAndMessaging::{
-    IDYES, MB_ICONQUESTION, MB_YESNO, MessageBoxW,
-};
 
 const PROG_ID: &str = "typors.md";
 const APP_NAME: &str = "typors";
@@ -84,9 +82,7 @@ pub fn register(exe: &Path, scope: Scope) -> std::io::Result<()> {
 pub fn register_from_cli(exe: &Path, scope: Scope) -> bool {
     match register(exe, scope) {
         Ok(()) => {
-            println!(
-                "typors: registered as a Markdown (.md) candidate handler ({scope:?})"
-            );
+            println!("typors: registered as a Markdown (.md) candidate handler ({scope:?})");
             true
         }
         Err(error) => {
@@ -146,10 +142,7 @@ unsafe fn ask_user() -> i32 {
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    let title: Vec<u16> = "typors"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let title: Vec<u16> = "typors".encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
         MessageBoxW(
             std::ptr::null_mut(),

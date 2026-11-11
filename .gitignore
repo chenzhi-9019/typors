@@ -5,3 +5,5 @@
 run.log
 test-debug.log
 *.log
+
+/tmp

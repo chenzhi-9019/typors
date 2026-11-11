@@ -8,7 +8,5 @@ pub mod doc;
 pub mod marked;
 pub mod sample;
 
-pub use doc::{
-    Block, BlockKind, Document, MarkerKind, RenderPos, Span, SpanKind, Style,
-};
+pub use doc::{Block, BlockKind, Document, MarkerKind, RenderPos, Span, SpanKind, Style};
 pub use marked::MarkedText;

@@ -101,11 +101,18 @@ pub fn projection_invariants(
         caret_block
     ));
     match (caret_block, sources.as_slice()) {
-        (Some(block), [only]) if block == *only => {}
-        // No caret: the document must be fully rendered.
-        (None, []) => {}
+        // Live preview: a rich chart/mermaid fence or a caret touching an inline
+        // delimiter is source; every other block is rendered.
+        (Some(block), [only])
+            if block == *only
+                && (view.doc().block_is_rich_fence(*only)
+                    || view
+                        .caret()
+                        .is_some_and(|caret| view.doc().caret_touches_inline_marker(caret))) => {}
+        // No caret or caret in an ordinary block: everything is rendered.
+        (_, []) => {}
         (Some(block), other) => failures.push(format!(
-            "{what}: caret in block {block}, source blocks {other:?}"
+            "{what}: caret in block {block}, unexpected source blocks {other:?}"
         )),
         (None, other) => failures.push(format!(
             "{what}: no caret, yet blocks {other:?} are projected as source"
@@ -114,7 +121,11 @@ pub fn projection_invariants(
     let doc_text = view.doc().text();
     for block in &layout.blocks {
         let painted = block.painted_text();
-        let displayed: String = block.display_text().chars().filter(|c| *c != '\n').collect();
+        let displayed: String = block
+            .display_text()
+            .chars()
+            .filter(|c| *c != '\n')
+            .collect();
         if painted != displayed {
             failures.push(format!(
                 "{what}: block {} painted {painted:?} != displayed {displayed:?}",

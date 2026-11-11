@@ -26,6 +26,28 @@ fn main() {
 
 富内容：图片、公式、表格、行内 HTML 与原生 mermaid。
 
+```chart
+pie
+
+a: 10%
+b: 30%
+c: 50%
+
+a.color: #FF0000
+a.label: Test
+```
+
+```chart
+line
+
+a: [1, 2, 3, 4, 5]
+b: [1, 2, 3, 4, 5]
+
+a.color: #FF0000
+a.label: Test
+a.marker: *
+```
+
 ```mermaid
 flowchart LR
   A[写 Markdown] --> B[原生布局] --> C[矢量渲染]

@@ -16,8 +16,14 @@ typors-core = { path = "../typors-core" }
 typors-editor = { path = "../typors-editor" }
 typors-probes = { path = "../typors-probes" }
 typors-render = { path = "../typors-render" }
+typors-settings = { path = "../typors-settings" }
 winreg = "0.56.0"
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

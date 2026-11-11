@@ -10,13 +10,13 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use crate::diagram::{Diagram, DiagramEngine};
 use gpui_kit::gpui::{
     App, DevicePixels, Image, ImageFormat, ImgResourceLoader, Pixels, RenderImage, Resource, Size,
     SvgRenderer, SvgSize, Window, px,
 };
 use typors_core::doc::{Document, ObjectKind, SpanKind};
-use typors_media::mermaid::Diagram;
-use typors_media::{ImageRef, MathEngine, MathMetrics, classify};
+use typors_media::{Chart, ImageRef, MathEngine, MathMetrics, classify};
 use typors_render::{MediaMeasures, ObjectMetrics};
 
 /// A resolved image, ready to paint.
@@ -53,7 +53,10 @@ pub struct MediaContext {
     math: MathEngine,
     images: HashMap<String, ImageState>,
     diagrams: Mutex<HashMap<String, Result<Arc<Diagram>, String>>>,
+    diagram_engine: Mutex<DiagramEngine>,
     diagram_images: Mutex<HashMap<(u64, i32, i32), Arc<RenderImage>>>,
+    charts: Mutex<HashMap<String, Result<Arc<Chart>, String>>>,
+    chart_images: Mutex<HashMap<(u64, i32, i32), Arc<RenderImage>>>,
     doc_dir: Option<PathBuf>,
     generation: u64,
 }
@@ -70,7 +73,10 @@ impl MediaContext {
             math: MathEngine::new(),
             images: HashMap::new(),
             diagrams: Mutex::new(HashMap::new()),
+            diagram_engine: Mutex::new(DiagramEngine::new()),
             diagram_images: Mutex::new(HashMap::new()),
+            charts: Mutex::new(HashMap::new()),
+            chart_images: Mutex::new(HashMap::new()),
             doc_dir,
             generation: 0,
         }
@@ -95,9 +101,12 @@ impl MediaContext {
         {
             return hit.clone();
         }
-        let rendered = typors_media::mermaid::render(source)
-            .map(Arc::new)
-            .map_err(|error| error.to_string());
+        let rendered = self
+            .diagram_engine
+            .lock()
+            .map_err(|_| "diagram engine poisoned".to_string())
+            .and_then(|mut engine| engine.render(source))
+            .map(Arc::new);
         if let Ok(mut cache) = self.diagrams.lock() {
             // Keep the cache bounded; a document rarely has hundreds of diagrams.
             if cache.len() > 64 {
@@ -142,10 +151,58 @@ impl MediaContext {
         Some(image)
     }
 
+    pub fn chart(&self, source: &str) -> Result<Arc<Chart>, String> {
+        if let Ok(cache) = self.charts.lock()
+            && let Some(hit) = cache.get(source)
+        {
+            return hit.clone();
+        }
+        let rendered = typors_media::chart::render(source)
+            .map(Arc::new)
+            .map_err(|error| error);
+        if let Ok(mut cache) = self.charts.lock() {
+            if cache.len() > 32 {
+                cache.clear();
+            }
+            cache.insert(source.to_string(), rendered.clone());
+        }
+        rendered
+    }
+
+    pub fn chart_image(
+        &self,
+        source: &str,
+        width: i32,
+        height: i32,
+        renderer: &SvgRenderer,
+    ) -> Option<Arc<RenderImage>> {
+        let width = width.clamp(1, 8192);
+        let height = height.clamp(1, 8192);
+        let key = (hash_str(source), width, height);
+        if let Ok(cache) = self.chart_images.lock()
+            && let Some(hit) = cache.get(&key)
+        {
+            return Some(hit.clone());
+        }
+        let chart = self.chart(source).ok()?;
+        let parsed = renderer.parse_svg(chart.svg.as_bytes()).ok()?;
+        let image = renderer
+            .render_parsed(
+                &parsed,
+                SvgSize::ExactSize(Size::new(DevicePixels(width), DevicePixels(height))),
+            )
+            .ok()?;
+        if let Ok(mut cache) = self.chart_images.lock() {
+            if cache.len() > 32 {
+                cache.clear();
+            }
+            cache.insert(key, image.clone());
+        }
+        Some(image)
+    }
+
     pub fn image_state(&self, destination: &str) -> &ImageState {
-        self.images
-            .get(destination)
-            .unwrap_or(&ImageState::Pending)
+        self.images.get(destination).unwrap_or(&ImageState::Pending)
     }
 
     /// Look up already-decoded images and kick off loads for new ones. Called
@@ -177,7 +234,8 @@ fn hash_str(text: &str) -> u64 {
     hasher.finish()
 }
 
-fn same_state(a: &ImageState, b: &ImageState) -> bool {    match (a, b) {
+fn same_state(a: &ImageState, b: &ImageState) -> bool {
+    match (a, b) {
         (ImageState::Pending, ImageState::Pending) => true,
         (ImageState::Failed(x), ImageState::Failed(y)) => x == y,
         (
@@ -204,9 +262,7 @@ impl MediaMeasures for MediaContext {
                 Err(_) => failed_object_metrics(*display),
             },
             ObjectKind::Image { destination, .. } => match self.images.get(destination) {
-                Some(ImageState::Ready {
-                    width, height, ..
-                }) => ObjectMetrics {
+                Some(ImageState::Ready { width, height, .. }) => ObjectMetrics {
                     width: px(*width),
                     height: px(*height),
                     ascent: px(*height * 0.75),
@@ -232,6 +288,22 @@ impl MediaMeasures for MediaContext {
                     height: px(240.),
                     ascent: px(180.),
                     descent: px(60.),
+                    display: true,
+                },
+            },
+            ObjectKind::Chart { source } => match self.chart(source) {
+                Ok(chart) => ObjectMetrics {
+                    width: px(chart.width.clamp(240.0, 1200.0)),
+                    height: px(chart.height.clamp(160.0, 1200.0)),
+                    ascent: px(chart.height * 0.75),
+                    descent: px(chart.height * 0.25),
+                    display: true,
+                },
+                Err(_) => ObjectMetrics {
+                    width: px(560.),
+                    height: px(340.),
+                    ascent: px(255.),
+                    descent: px(85.),
                     display: true,
                 },
             },

@@ -7300,9 +7300,11 @@ version = "1.0.1"
 dependencies = [
  "gpui-fps",
  "gpui-kit",
+ "libloading",
  "typors-core",
  "typors-media",
  "typors-render",
+ "typors-settings",
 ]
 
 [[package]]
@@ -7310,10 +7312,16 @@ name = "typors-media"
 version = "1.0.1"
 dependencies = [
  "base64 0.22.1",
- "merman",
  "ratex-layout",
  "ratex-parser",
  "ratex-svg",
+]
+
+[[package]]
+name = "typors-mermaid"
+version = "1.0.1"
+dependencies = [
+ "merman",
 ]
 
 [[package]]
@@ -7332,6 +7340,7 @@ version = "1.0.1"
 dependencies = [
  "gpui-kit",
  "typors-core",
+ "typors-settings",
 ]
 
 [[package]]
@@ -7344,18 +7353,17 @@ dependencies = [
  "typors-editor",
  "typors-probes",
  "typors-render",
+ "typors-settings",
  "windows-sys 0.61.2",
  "winreg",
 ]
 
 [[package]]
-name = "typors-spike"
-version = "0.0.0"
+name = "typors-settings"
+version = "1.0.1"
 dependencies = [
- "gpui-fps",
- "gpui-kit",
- "pulldown-cmark",
- "ropey",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

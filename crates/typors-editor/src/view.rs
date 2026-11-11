@@ -24,25 +24,25 @@
 //! `window.rs:5391`), and [`MarkdownView`]'s `EntityInputHandler` impl routes the
 //! commit into [`MarkdownView::apply_edit`].
 
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::PathBuf;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
 use gpui_kit::gpui::*;
 
-use typors_core::Document;
-use crate::ime::MarkedText;
 use crate::capture::{
     DumpCapture, DumpSink, ImeSink, MediaProbeFn, MediaSink, PerfProbeFn, PerfSink, SelectSink,
 };
+use crate::ime::MarkedText;
 use crate::media::{MediaContext, paint_image};
+use crate::selection::{HighlightRect, History, HistoryAction, Selection, undo_range};
+use typors_core::Document;
 use typors_render::{
     BlockCache, DocLayout, DrawSpan, EditorTheme, LayoutMode, Metrics, ShapeCache, Viewport,
     WindowMetrics,
 };
-use crate::selection::{HighlightRect, History, HistoryAction, Selection, undo_range};
 
 /// Slack kept above and below the visible band when culling, as a fraction of the
 /// viewport height (task 7.1). One full viewport: a fragment that straddles the
@@ -62,11 +62,16 @@ pub const CULL_MARGIN: f32 = 1.0;
 /// these two, `TYPORS_SCROLL=120000 TYPORS_CULL_LOG=1 cargo run --release --
 /// sample.md` prints the band the real scroll produced.
 fn env_f32(name: &str) -> Option<f32> {
-    std::env::var(name).ok().and_then(|value| value.parse().ok())
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse().ok())
 }
 
 fn env_flag(name: &str) -> bool {
-    matches!(std::env::var(name).as_deref(), Ok("1") | Ok("on") | Ok("true"))
+    matches!(
+        std::env::var(name).as_deref(),
+        Ok("1") | Ok("on") | Ok("true")
+    )
 }
 
 /// Which entry point changed the buffer.
@@ -91,6 +96,8 @@ pub enum EditTrigger {
     Redo,
     /// An edit made through the public [`MarkdownView::apply_edit`] API.
     Api,
+    /// A menu formatting command (bold/heading/list/...).
+    Format,
 }
 
 impl EditTrigger {
@@ -106,11 +113,165 @@ impl EditTrigger {
             EditTrigger::Undo => "undo",
             EditTrigger::Redo => "redo",
             EditTrigger::Api => "api",
+            EditTrigger::Format => "format",
         }
     }
 }
 
-/// `TYPORS_EDIT_LOG=1`: one structured line per buffer change.
+/// A command from the menu that changes Markdown formatting at the caret.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EditorCommand {
+    Heading(u8),
+    Paragraph,
+    BulletList,
+    OrderedList,
+    Quote,
+    CodeBlock,
+    Bold,
+    Italic,
+    Strike,
+    InlineCode,
+    InlineMath,
+    Link,
+    Image,
+}
+
+impl MarkdownView {
+    /// Apply one formatting command through the normal edit/undo path.
+    pub fn apply_editor_command(&mut self, command: EditorCommand) -> bool {
+        let before = self.doc.revision();
+        match command {
+            EditorCommand::Bold => self.wrap_selection("**", "**"),
+            EditorCommand::Italic => self.wrap_selection("*", "*"),
+            EditorCommand::Strike => self.wrap_selection("~~", "~~"),
+            EditorCommand::InlineCode => self.wrap_selection("`", "`"),
+            EditorCommand::InlineMath => self.wrap_selection("$", "$"),
+            EditorCommand::Link => self.wrap_selection("[", "](https://)"),
+            EditorCommand::Image => self.wrap_selection("![", "](assets/image.png)"),
+            EditorCommand::Heading(level) => {
+                self.set_line_prefix(&format!("{} ", "#".repeat(level as usize)))
+            }
+            EditorCommand::Paragraph => self.set_line_prefix(""),
+            EditorCommand::BulletList => self.toggle_line_prefix("- ", &["- ", "* ", "+ "]),
+            EditorCommand::OrderedList => self.toggle_line_prefix("1. ", &["1. "]),
+            EditorCommand::Quote => self.toggle_line_prefix("> ", &["> "]),
+            EditorCommand::CodeBlock => self.wrap_lines("```\n", "\n```"),
+        }
+        self.doc.revision() != before
+    }
+
+    fn wrap_selection(&mut self, prefix: &str, suffix: &str) {
+        if let Some(range) = self.selection_range() {
+            let text = self.doc.text()[range.clone()].to_string();
+            let inserted = format!("{prefix}{text}{suffix}");
+            let start = range.start;
+            self.apply_edit_internal(range, &inserted, HistoryAction::Record, EditTrigger::Format);
+            self.anchor = Some(start + prefix.len());
+            self.caret = Some(start + prefix.len() + text.len());
+            return;
+        }
+        let at = self.caret.unwrap_or(0);
+        let inserted = format!("{prefix}{suffix}");
+        self.apply_edit_internal(
+            at..at,
+            &inserted,
+            HistoryAction::Record,
+            EditTrigger::Format,
+        );
+        self.caret = Some(at + prefix.len());
+        self.anchor = self.caret;
+    }
+
+    fn wrap_lines(&mut self, prefix: &str, suffix: &str) {
+        let (start, end) = self
+            .selection_range()
+            .map_or((self.caret.unwrap_or(0), self.caret.unwrap_or(0)), |r| {
+                (r.start, r.end)
+            });
+        let text = self.doc.text()[start..end].to_string();
+        let inserted = format!("{prefix}{text}{suffix}");
+        self.apply_edit_internal(
+            start..end,
+            &inserted,
+            HistoryAction::Record,
+            EditTrigger::Format,
+        );
+        self.anchor = Some(start + prefix.len());
+        self.caret = Some(start + prefix.len() + text.len());
+    }
+
+    fn set_line_prefix(&mut self, prefix: &str) {
+        let (line_start, line_end) = self.current_line();
+        let text = self.doc.text();
+        let line = &text[line_start..line_end];
+        let (existing, content) = strip_line_prefix(line);
+        let _ = existing;
+        let new_line = format!("{prefix}{content}");
+        self.replace_line(line_start, line_end, &new_line);
+    }
+
+    fn toggle_line_prefix(&mut self, prefix: &str, known: &[&str]) {
+        let (line_start, line_end) = self.current_line();
+        let text = self.doc.text();
+        let line = &text[line_start..line_end];
+        let (existing, content) = strip_line_prefix(line);
+        let new_line = if known.contains(&existing) {
+            content.to_string()
+        } else {
+            format!("{prefix}{content}")
+        };
+        self.replace_line(line_start, line_end, &new_line);
+    }
+
+    fn replace_line(&mut self, line_start: usize, line_end: usize, new_line: &str) {
+        let caret = self.caret.unwrap_or(line_start);
+        let old_prefix = caret.saturating_sub(line_start).min(new_line.len());
+        self.apply_edit_internal(
+            line_start..line_end,
+            new_line,
+            HistoryAction::Record,
+            EditTrigger::Format,
+        );
+        self.caret = Some((line_start + old_prefix).min(line_start + new_line.len()));
+        self.anchor = self.caret;
+    }
+
+    fn current_line(&self) -> (usize, usize) {
+        let caret = self.caret.unwrap_or(0);
+        let text = self.doc.text();
+        let start = text[..caret].rfind('\n').map_or(0, |index| index + 1);
+        let end = text[caret..]
+            .find('\n')
+            .map_or(text.len(), |index| caret + index);
+        (start, end)
+    }
+}
+
+fn strip_line_prefix(line: &str) -> (&str, &str) {
+    if let Some(index) = line.find(". ")
+        && line[..index].chars().all(|ch| ch.is_ascii_digit())
+        && index > 0
+    {
+        return (&line[..index + 2], &line[index + 2..]);
+    }
+    for prefix in ["- ", "* ", "+ ", "> ", "- [ ] ", "- [x] "] {
+        if let Some(rest) = line.strip_prefix(prefix) {
+            return (prefix, rest);
+        }
+    }
+    if let Some(rest) = line.strip_prefix("# ") {
+        return ("# ", rest);
+    }
+    for level in 1..=6 {
+        let hash = "#".repeat(level);
+        let marker = format!("{hash} ");
+        if let Some(rest) = line.strip_prefix(&marker) {
+            return (&line[..level + 1], rest);
+        }
+    }
+    ("", line)
+}
+
 ///
 /// Off by default (it is per keystroke); on when chasing "did that key even
 /// reach the buffer". `insert` is always escaped, because the whole point is to
@@ -201,7 +362,8 @@ actions!(
 /// One keyboard caret movement. Vertical moves are geometric (they keep an x),
 /// horizontal moves are textual (they walk char boundaries).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CaretMove {    Left,
+pub enum CaretMove {
+    Left,
     Right,
     Up,
     Down,
@@ -241,12 +403,15 @@ pub struct CaretState {
     pub bounds: Option<Bounds<Pixels>>,
 }
 
-/// The projection rule, in one place: the block that owns the caret is the only
-/// block shown as Markdown source.
+/// Typora live preview: every block is rendered, including the block under the
+/// caret. Only chart/mermaid fences keep their raw source while focused, because
+/// they must not collapse into an SVG while the user is typing inside them.
 pub fn mode_for(doc: &Document, caret: Option<usize>) -> LayoutMode {
-    LayoutMode {
-        source_block: caret.and_then(|src| doc.block_at_src(src)),
-    }
+    let source_block = caret.and_then(|src| {
+        let idx = doc.block_at_src(src)?;
+        (doc.block_is_rich_fence(idx)).then_some(idx)
+    });
+    LayoutMode { source_block }
 }
 
 /// UTF-8 byte offset -> UTF-16 code units. `EntityInputHandler` speaks UTF-16,
@@ -283,6 +448,17 @@ pub struct MarkdownView {
     /// The caret: a byte offset into the source buffer, or `None` before the
     /// first click (a document with no caret is drawn fully rendered).
     caret: Option<usize>,
+    /// Blink phase: true means the caret is painted this frame.
+    caret_visible: bool,
+    blink_enabled: bool,
+    blink_interval_ms: u64,
+    blink_started: bool,
+    /// Bumped by every activity reset; a sleeping timer can observe it.
+    blink_generation: u64,
+    completion: Option<crate::completion::CompletionState>,
+    completion_enabled: bool,
+    completion_delay_ms: u64,
+    completion_generation: u64,
     /// The selection's fixed end, also a source byte offset. The live selection is
     /// `anchor..caret` whenever the two differ; `anchor == caret` (or `None`) is a
     /// collapsed caret. Deliberately *two* source offsets and nothing else: the
@@ -380,11 +556,22 @@ pub struct MarkdownView {
 
 impl MarkdownView {
     pub fn new(doc: Document, cx: &mut Context<Self>) -> Self {
-        Self {            doc,
+        let blank = doc.len_bytes() == 0;
+        Self {
+            doc,
             theme: EditorTheme::default(),
             focus_handle: cx.focus_handle(),
-            caret: None,
-            anchor: None,
+            caret: blank.then_some(0),
+            caret_visible: true,
+            blink_enabled: true,
+            blink_interval_ms: 530,
+            blink_started: false,
+            blink_generation: 0,
+            completion: None,
+            completion_enabled: true,
+            completion_delay_ms: 150,
+            completion_generation: 0,
+            anchor: blank.then_some(0),
             history: History::new(),
             clipboard: None,
             marked_selection: None,
@@ -510,8 +697,152 @@ impl MarkdownView {
         }
     }
 
+    /// Apply persisted settings: theme, page metrics and blink.
+    pub fn apply_settings(&mut self, settings: &typors_settings::Settings, cx: &mut Context<Self>) {
+        self.theme = typors_render::EditorTheme::from_settings(settings);
+        self.completion_enabled = settings.editing.completion_enabled;
+        self.completion_delay_ms = settings.editing.completion_delay_ms as u64;
+        if !self.completion_enabled {
+            self.completion = None;
+        }
+        self.set_blink(
+            settings.editing.blink_enabled,
+            settings.editing.blink_interval_ms as u64,
+            cx,
+        );
+        self.stale = true;
+        self.layout = None;
+        cx.notify();
+    }
+
+    pub fn completion(&self) -> Option<&crate::completion::CompletionState> {
+        self.completion.as_ref()
+    }
+
+    pub fn completion_anchor(&self) -> Option<(Point<Pixels>, Pixels)> {
+        let state = self.completion.as_ref()?;
+        let layout = self.layout.as_ref()?;
+        let (block, byte) = layout.display_byte_for_src(&self.doc, state.start)?;
+        let bounds = layout.caret_bounds(block, byte)?;
+        Some((bounds.origin, bounds.size.height))
+    }
+
+    fn schedule_completion(&mut self, cx: &mut Context<Self>) {
+        self.completion_generation = self.completion_generation.wrapping_add(1);
+        let generation = self.completion_generation;
+        self.completion = None;
+        if !self.completion_enabled || self.marked.is_some() {
+            return;
+        }
+        let delay = self.completion_delay_ms;
+        let weak = cx.entity().downgrade();
+        cx.spawn(async move |_entity, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(delay))
+                .await;
+            let _ = weak.update(cx, |view, cx| {
+                if view.completion_generation != generation || view.marked.is_some() {
+                    return;
+                }
+                view.completion = view
+                    .caret
+                    .and_then(|caret| crate::completion::suggest(&view.doc, caret));
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn dismiss_completion(&mut self) {
+        self.completion_generation = self.completion_generation.wrapping_add(1);
+        self.completion = None;
+    }
+
+    pub fn move_completion(&mut self, delta: isize) {
+        if let Some(state) = &mut self.completion {
+            state.move_selection(delta);
+        }
+    }
+
+    pub fn accept_completion(&mut self) -> bool {
+        let Some(state) = self.completion.take() else {
+            return false;
+        };
+        let item = state.current().clone();
+        let start = state.start;
+        let end = state.end;
+        self.apply_edit_internal(
+            start..end,
+            &item.insert,
+            HistoryAction::Record,
+            EditTrigger::Format,
+        );
+        self.caret = Some((start + item.caret).min(self.doc.len_bytes()));
+        self.anchor = self.caret;
+        self.stale = true;
+        true
+    }
+
+    /// Page width for the current viewport, including Typora's 1400/1800 px
+    /// breakpoints on top of the user's preference.
+    pub fn page_width_for(&self, viewport_width: f32) -> f32 {
+        if (self.theme.page_width - 860.0).abs() < 0.5 {
+            if viewport_width >= 1800.0 {
+                1200.0
+            } else if viewport_width >= 1400.0 {
+                1024.0
+            } else {
+                860.0
+            }
+        } else {
+            self.theme.page_width
+        }
+    }
+
     pub fn doc(&self) -> &Document {
         &self.doc
+    }
+
+    /// Apply blink settings without restarting the view.
+    pub fn set_blink(&mut self, enabled: bool, interval_ms: u64, cx: &mut Context<Self>) {
+        self.blink_enabled = enabled;
+        self.blink_interval_ms = interval_ms.clamp(300, 1200);
+        if !enabled {
+            self.caret_visible = true;
+        }
+        self.reset_blink();
+        cx.notify();
+    }
+
+    /// Any activity makes the caret visible again and starts a new phase.
+    pub fn reset_blink(&mut self) {
+        self.caret_visible = true;
+        self.blink_generation = self.blink_generation.wrapping_add(1);
+    }
+
+    pub fn caret_visible(&self) -> bool {
+        self.caret_visible
+    }
+
+    /// Replace the whole document (New/Open) and reset every piece of state that
+    /// points into the old buffer. The one caret that remains is at offset 0.
+    pub fn replace_document(&mut self, doc: Document, cx: &mut Context<Self>) {
+        self.doc = doc;
+        self.caret = Some(0);
+        self.anchor = Some(0);
+        self.history = History::new();
+        self.marked = None;
+        self.marked_selection = None;
+        self.dragging = false;
+        self.desired_x = None;
+        self.layout = None;
+        self.stale = true;
+        self.scroll_epoch = None;
+        self.scroll_anchor = None;
+        self.scroll_handle.set_offset(point(px(0.), px(0.)));
+        self.block_cache = BlockCache::new();
+        self.painted_objects = 0;
+        cx.notify();
     }
 
     pub fn theme(&self) -> &EditorTheme {
@@ -551,6 +882,19 @@ impl MarkdownView {
     }
 
     pub fn mode(&self) -> LayoutMode {
+        self.projection_mode()
+    }
+
+    /// During an IME composition the uncommitted string only exists in the
+    /// platform callback, not in the rope. Paint that one block as source so the
+    /// composition can be spliced and underlined; once it commits, live preview
+    /// resumes.
+    fn projection_mode(&self) -> LayoutMode {
+        if self.marked.is_some() {
+            return LayoutMode {
+                source_block: self.caret.and_then(|src| self.doc.block_at_src(src)),
+            };
+        }
         mode_for(&self.doc, self.caret)
     }
 
@@ -701,10 +1045,12 @@ impl MarkdownView {
     ) -> Option<CaretScroll> {
         let (block_idx, display_byte) = self.caret_display_position(layout)?;
         let rect = layout.caret_bounds(block_idx, display_byte)?;
-        let margin = layout.blocks.get(block_idx).map_or(
-            self.theme.body_size * self.theme.line_ratio,
-            |block| block.line_height.as_f32(),
-        );
+        let margin = layout
+            .blocks
+            .get(block_idx)
+            .map_or(self.theme.body_size * self.theme.line_ratio, |block| {
+                block.line_height.as_f32()
+            });
         let scroll = self.scroll_offset_y();
         let target = caret_scroll_target(
             rect.top().as_f32(),
@@ -857,7 +1203,7 @@ impl MarkdownView {
             metrics,
             origin,
             width,
-            mode_for(&self.doc, self.caret),
+            self.projection_mode(),
             self.marked.as_ref(),
             media,
             generation,
@@ -927,6 +1273,7 @@ impl MarkdownView {
         self.anchor = Some(src);
         self.desired_x = None;
         self.stale = true;
+        self.reset_blink();
     }
 
     /// Drop the caret: the document goes back to being fully rendered.
@@ -1003,7 +1350,7 @@ impl MarkdownView {
             metrics,
             origin,
             width,
-            mode_for(&self.doc, self.caret),
+            self.projection_mode(),
             self.marked.as_ref(),
             media,
             generation,
@@ -1077,6 +1424,7 @@ impl MarkdownView {
         self.anchor = Some(src);
         self.desired_x = None;
         self.stale = true;
+        self.reset_blink();
         Some(src)
     }
 
@@ -1117,8 +1465,11 @@ impl MarkdownView {
             }
             CaretMove::Down => {
                 let Some(target) = self.vertical_target(caret, 1) else {
-                    return false;
+                    return self.jump_block(caret, 1);
                 };
+                if target == caret {
+                    return self.jump_block(caret, 1);
+                }
                 target
             }
         };
@@ -1151,6 +1502,30 @@ impl MarkdownView {
             .block_at_src(src)
             .and_then(|idx| self.doc.blocks().get(idx).map(|b| b.src.start))
             .unwrap_or(0)
+    }
+
+    /// Last-resort vertical move when the target line cannot be hit (a table or
+    /// tall object whose paint band overlaps the next block). Still moves one
+    /// block, never leaves the caret stuck.
+    fn jump_block(&mut self, caret: usize, dir: i32) -> bool {
+        let Some(idx) = self.doc.block_at_src(caret) else {
+            return false;
+        };
+        let target = if dir > 0 {
+            self.doc.blocks().get(idx + 1).map(|b| b.src.start)
+        } else {
+            self.doc
+                .blocks()
+                .get(idx.saturating_sub(1))
+                .map(|b| b.src.start)
+        };
+        let Some(target) = target else {
+            return false;
+        };
+        self.caret = Some(self.doc.snap_floor(target));
+        self.anchor = self.caret;
+        self.stale = true;
+        true
     }
 
     /// End of the caret block's own line: before the block's trailing newline.
@@ -1195,7 +1570,11 @@ impl MarkdownView {
         // height when it leaves the source projection (a 180px image becomes one
         // 26px Markdown line), which would otherwise make the hit-test land on
         // the object that is still rendered.
-        let pending = self.layout_for_source(Some(target_block))?;
+        let pending_source = self
+            .doc
+            .block_is_rich_fence(target_block)
+            .then_some(target_block);
+        let pending = self.layout_for_source(pending_source)?;
         let tops = pending.line_tops(target_block);
         let target_top = if same_block {
             *tops.get((line as i32 + dir) as usize)?
@@ -1207,6 +1586,12 @@ impl MarkdownView {
         let line_height = pending.blocks.get(target_block)?.line_height;
         let y = px(target_top.as_f32() + line_height.as_f32() * 0.5);
         let hit = pending.hit(point(x, y))?;
+        if hit.block_idx != target_block {
+            // Tall objects/tables can overlap the next line's hit band. The
+            // movement contract is "one visual line", not "whatever paints at
+            // this y", so a cross-block move lands at the target's start.
+            return Some(pending.blocks.get(target_block)?.src.start);
+        }
         pending.src_for_display_byte(&self.doc, hit.block_idx, hit.render_byte)
     }
 }
@@ -1564,7 +1949,12 @@ impl MarkdownView {
             return false;
         }
         let prev = prev_char_boundary(&self.doc, caret);
-        self.apply_edit_internal(prev..caret, "", HistoryAction::Record, EditTrigger::Backspace);
+        self.apply_edit_internal(
+            prev..caret,
+            "",
+            HistoryAction::Record,
+            EditTrigger::Backspace,
+        );
         true
     }
 
@@ -1677,12 +2067,7 @@ impl MarkdownView {
         self.on_extend(CaretMove::LineStart, cx);
     }
 
-    fn extend_line_end(
-        &mut self,
-        _: &ExtendLineEnd,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn extend_line_end(&mut self, _: &ExtendLineEnd, _window: &mut Window, cx: &mut Context<Self>) {
         self.on_extend(CaretMove::LineEnd, cx);
     }
 
@@ -1709,7 +2094,12 @@ impl MarkdownView {
         }
     }
 
-    fn paste_clipboard(&mut self, _: &PasteClipboard, _window: &mut Window, cx: &mut Context<Self>) {
+    fn paste_clipboard(
+        &mut self,
+        _: &PasteClipboard,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.paste(cx) {
             cx.notify();
         }
@@ -1743,6 +2133,15 @@ impl MarkdownView {
             // The press starts a drag: moves until the release extend the
             // selection from this anchor instead of moving the caret.
             self.dragging = true;
+            cx.notify();
+        } else if self.doc.len_bytes() == 0 {
+            // A blank page has no fragment to hit, but it still owns the caret at
+            // offset 0. Without this, the first click on an empty document did
+            // nothing and typing had no visible insertion point.
+            self.caret = Some(0);
+            self.anchor = Some(0);
+            self.dragging = false;
+            self.desired_x = None;
             cx.notify();
         }
     }
@@ -2065,6 +2464,7 @@ impl EntityInputHandler for MarkdownView {
         );
         // The candidate window is anchored on the caret we just moved.
         window.invalidate_character_coordinates();
+        self.schedule_completion(cx);
         cx.notify();
     }
 
@@ -2089,7 +2489,8 @@ impl EntityInputHandler for MarkdownView {
                     // Windows always passes `None` (`events.rs:735-754`). A
                     // composition started on a selection starts at its beginning:
                     // the selection is remembered, not yet deleted.
-                    None => selection.map_or_else(|| self.caret.unwrap_or(0), |sel| sel.src_range().start),
+                    None => selection
+                        .map_or_else(|| self.caret.unwrap_or(0), |sel| sel.src_range().start),
                 };
                 // 选中后提交必须替换整个选区 (and Esc must give it back): from here on
                 // the platform only ever tells us about the collapsed anchor, so
@@ -2101,7 +2502,8 @@ impl EntityInputHandler for MarkdownView {
         let ime_selection = new_selected_range_utf16
             .as_ref()
             .map(|r| utf16_to_byte(new_text, r.start)..utf16_to_byte(new_text, r.end));
-        self.marked = (!new_text.is_empty()).then(|| MarkedText::new(new_text, anchor, ime_selection));
+        self.marked =
+            (!new_text.is_empty()).then(|| MarkedText::new(new_text, anchor, ime_selection));
         // The rope keeps the caret where the composition starts: that is what
         // keeps the block in the source projection for the whole composition
         // (「组合期间源态保持」) and the geometry stable frame to frame.
@@ -2109,6 +2511,7 @@ impl EntityInputHandler for MarkdownView {
         self.anchor = self.caret;
         self.desired_x = None;
         self.stale = true;
+        self.dismiss_completion();
         crate::ime::log_ime(
             "mark",
             format_args!(
@@ -2187,6 +2590,32 @@ impl Focusable for MarkdownView {
 
 impl Render for MarkdownView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let page_width = self.page_width_for(window.viewport_size().width.as_f32());
+        if !self.blink_started {
+            self.blink_started = true;
+            let weak = cx.entity().downgrade();
+            cx.spawn(async move |_entity, cx| {
+                loop {
+                    let interval = match weak.update(cx, |view, _| view.blink_interval_ms) {
+                        Ok(ms) => ms,
+                        Err(_) => break,
+                    };
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(interval))
+                        .await;
+                    let toggled = weak.update(cx, |view, cx| {
+                        if view.blink_enabled {
+                            view.caret_visible = !view.caret_visible;
+                            cx.notify();
+                        }
+                    });
+                    if toggled.is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         // Debug hook for task 7.1 only; a no-op unless `TYPORS_SCROLL` is set.
         if !self.scroll_applied
             && let Some(target) = env_f32("TYPORS_SCROLL")
@@ -2198,6 +2627,8 @@ impl Render for MarkdownView {
         let page = div()
             .id("typors-page")
             .size_full()
+            .max_w(px(page_width))
+            .mx_auto()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
             .bg(self.theme.page_bg)
@@ -2230,9 +2661,7 @@ impl Render for MarkdownView {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .child(DocElement {
-                view: cx.entity(),
-            });
+            .child(DocElement { view: cx.entity() });
 
         if self.show_fps {
             // The real `gpui-fps` HUD (task 7.1). `--dump-perf` cannot host it
@@ -2405,9 +2834,7 @@ fn collect_objects(
                 typors_core::doc::ObjectKind::Image {
                     destination, alt, ..
                 } => {
-                    if let Some(image) =
-                        paint_image(destination, doc_dir.as_deref(), window, cx)
-                    {
+                    if let Some(image) = paint_image(destination, doc_dir.as_deref(), window, cx) {
                         objects.push(ObjectCmd::Image {
                             bounds: object.bounds,
                             image,
@@ -2505,6 +2932,40 @@ fn collect_objects(
                         }
                     }
                 }
+                typors_core::doc::ObjectKind::Chart { source } => {
+                    let scale = window.scale_factor().max(0.5);
+                    let width = (object.bounds.size.width.as_f32() * scale).round() as i32;
+                    let height = (object.bounds.size.height.as_f32() * scale).round() as i32;
+                    let renderer = cx.svg_renderer();
+                    if let Some(image) = media.chart_image(source, width, height, &renderer) {
+                        objects.push(ObjectCmd::Image {
+                            bounds: object.bounds,
+                            image,
+                        });
+                    } else if let Ok(chart) = media.chart(source) {
+                        objects.push(ObjectCmd::Svg {
+                            bounds: object.bounds,
+                            svg: std::sync::Arc::from(chart.svg.as_str()),
+                        });
+                    } else {
+                        let line = metrics.shaped(
+                            "chart 渲染失败",
+                            object.font_size,
+                            typors_core::Style::PLAIN,
+                            false,
+                            rgba(0xCF222EFF),
+                            false,
+                        );
+                        texts.push(TextCmd {
+                            origin: point(
+                                object.bounds.left() + px(2.),
+                                object.bounds.top() + px(2.),
+                            ),
+                            line_height: object.bounds.size.height,
+                            line,
+                        });
+                    }
+                }
             }
         }
     }
@@ -2542,7 +3003,11 @@ impl Element for DocElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let width = window.viewport_size().width;
+        let width = px(window.viewport_size().width.as_f32().min(
+            self.view
+                .read(cx)
+                .page_width_for(window.viewport_size().width.as_f32()),
+        ));
         let viewport_height = window.viewport_size().height.as_f32();
         let view = self.view.clone();
         let (mono_family, cache) = {
@@ -2640,15 +3105,19 @@ impl Element for DocElement {
         // everything else in `paint`.
         let caret = {
             let view = self.view.read(cx);
-            view.caret_display_position(request_layout)
-                .and_then(|(block_idx, display_byte)| {
-                    request_layout
-                        .caret_bounds(block_idx, display_byte)
-                        .map(|bounds| QuadCmd {
-                            bounds,
-                            color: request_layout.theme.caret,
-                        })
-                })
+            if !view.caret_visible {
+                None
+            } else {
+                view.caret_display_position(request_layout)
+                    .and_then(|(block_idx, display_byte)| {
+                        request_layout
+                            .caret_bounds(block_idx, display_byte)
+                            .map(|bounds| QuadCmd {
+                                bounds,
+                                color: request_layout.theme.caret,
+                            })
+                    })
+            }
         };
 
         // Selection highlight (5.1): one quad per painted fragment the selection
@@ -2735,14 +3204,8 @@ impl Element for DocElement {
                 } => {
                     let mut box_ = *object_bounds;
                     box_.origin = shift(box_.origin);
-                    let painted = window.paint_image(
-                        box_,
-                        box_,
-                        Corners::default(),
-                        image.clone(),
-                        0,
-                        false,
-                    );
+                    let painted =
+                        window.paint_image(box_, box_, Corners::default(), image.clone(), 0, false);
                     debug_assert!(painted.is_ok(), "painting an image failed: {painted:?}");
                 }
                 ObjectCmd::Svg {
@@ -2755,8 +3218,7 @@ impl Element for DocElement {
                     svg.hash(&mut hasher);
                     (box_.size.width.as_f32()).to_bits().hash(&mut hasher);
                     (box_.size.height.as_f32()).to_bits().hash(&mut hasher);
-                    let key: SharedString =
-                        format!("typors-math-{:016x}", hasher.finish()).into();
+                    let key: SharedString = format!("typors-math-{:016x}", hasher.finish()).into();
                     let painted = window.paint_svg(
                         box_,
                         key,
@@ -2778,7 +3240,10 @@ impl Element for DocElement {
                 window,
                 cx,
             );
-            debug_assert!(painted.is_ok(), "painting a shaped line failed: {painted:?}");
+            debug_assert!(
+                painted.is_ok(),
+                "painting a shaped line failed: {painted:?}"
+            );
         }
         if focus_handle.is_focused(window)
             && let Some(caret) = &prepaint.caret
@@ -2820,11 +3285,8 @@ impl Element for DocElement {
                 let shape_cache = self.view.read(cx).shape_cache.clone();
                 let cached_started = std::time::Instant::now();
                 self.view.update(cx, |view, _cx| {
-                    let metrics = Arc::new(WindowMetrics::with_cache(
-                        window,
-                        mono_family,
-                        shape_cache,
-                    ));
+                    let metrics =
+                        Arc::new(WindowMetrics::with_cache(window, mono_family, shape_cache));
                     let _ =
                         view.layout_now_cached(metrics, point(px(0.), px(0.)), bounds.size.width);
                 });
@@ -2872,9 +3334,9 @@ impl Element for DocElement {
         if let Some(sink) = ime {
             let already = sink.lock().map(|guard| guard.is_some()).unwrap_or(true);
             if !already {
-                let capture =
-                    self.view
-                        .update(cx, |view, cx| crate::ime::ime_probe(view, window, cx));
+                let capture = self
+                    .view
+                    .update(cx, |view, cx| crate::ime::ime_probe(view, window, cx));
                 if let Ok(mut guard) = sink.lock() {
                     *guard = Some(capture);
                 }

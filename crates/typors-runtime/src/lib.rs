@@ -5,6 +5,9 @@
 
 mod app;
 mod associate;
+mod file_dialog;
+mod menu;
+mod shell;
 
 /// C entry point called by `typors-app`'s loader.
 ///
@@ -15,7 +18,10 @@ pub extern "C" fn typors_run() -> i32 {
     let args: Vec<String> = std::env::args().collect();
     let exe = std::env::current_exe().unwrap_or_default();
 
-    if args.iter().any(|arg| arg == "--register" || arg == "--register-all") {
+    if args
+        .iter()
+        .any(|arg| arg == "--register" || arg == "--register-all")
+    {
         let scope = if args.iter().any(|arg| arg == "--register-all") {
             associate::Scope::Machine
         } else {

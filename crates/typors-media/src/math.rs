@@ -117,7 +117,10 @@ impl MathEngine {
 
     /// Number of cached formulas (test/diagnostic hook).
     pub fn len(&self) -> usize {
-        self.cache.lock().map(|cache| cache.entries.len()).unwrap_or(0)
+        self.cache
+            .lock()
+            .map(|cache| cache.entries.len())
+            .unwrap_or(0)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -248,11 +251,17 @@ mod tests {
             "\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}",
             "\\text{你好} + \\alpha",
         ] {
-            let metrics = engine.measure(tex, 20.0).unwrap_or_else(|e| panic!("{tex}: {e}"));
+            let metrics = engine
+                .measure(tex, 20.0)
+                .unwrap_or_else(|e| panic!("{tex}: {e}"));
             assert!(metrics.width_px > 0.0, "{tex}: {metrics:?}");
             assert!(metrics.total_height_px() > 0.0, "{tex}: {metrics:?}");
             let svg = engine.svg(tex, 20.0).expect("svg");
-            assert!(svg.starts_with("<svg"), "{tex}: {}", &svg[..80.min(svg.len())]);
+            assert!(
+                svg.starts_with("<svg"),
+                "{tex}: {}",
+                &svg[..80.min(svg.len())]
+            );
             assert!(svg.contains("<path"), "{tex}: no glyph paths");
             assert!(!svg.contains("<text"), "{tex}: text elements survive");
         }
@@ -262,7 +271,10 @@ mod tests {
     fn invalid_formulas_return_errors_and_do_not_panic() {
         let engine = MathEngine::new();
         let error = engine.measure("\\badcommand{x}", 16.0).unwrap_err();
-        assert!(error.message.contains("Undefined control sequence"), "{error}");
+        assert!(
+            error.message.contains("Undefined control sequence"),
+            "{error}"
+        );
         assert!(engine.svg("\\badcommand{x}", 16.0).is_err());
         assert!(engine.measure("x", 0.0).is_err());
         assert!(engine.measure("x", f32::NAN).is_err());
