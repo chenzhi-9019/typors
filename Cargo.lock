@@ -7279,7 +7279,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "typors-app"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "libloading",
  "typors-core",
@@ -7288,7 +7288,7 @@ dependencies = [
 
 [[package]]
 name = "typors-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "pulldown-cmark",
  "ropey",
@@ -7296,7 +7296,7 @@ dependencies = [
 
 [[package]]
 name = "typors-editor"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "gpui-fps",
  "gpui-kit",
@@ -7307,7 +7307,7 @@ dependencies = [
 
 [[package]]
 name = "typors-media"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "merman",
@@ -7318,7 +7318,7 @@ dependencies = [
 
 [[package]]
 name = "typors-probes"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "gpui-kit",
  "typors-core",
@@ -7328,7 +7328,7 @@ dependencies = [
 
 [[package]]
 name = "typors-render"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "gpui-kit",
  "typors-core",
@@ -7336,7 +7336,7 @@ dependencies = [
 
 [[package]]
 name = "typors-runtime"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "gpui-fps",
  "gpui-kit",

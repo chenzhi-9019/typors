@@ -101,7 +101,7 @@ typors.exe --unregister
 ```powershell
 cargo build --release --workspace
 pwsh packaging\build-nsis.ps1
-# -> packaging\dist\typors-0.1.0-setup.exe
+# -> packaging\dist\typors-1.0.0-setup.exe
 ```
 
 The installer's optional sections (file association, desktop shortcut, Start-menu

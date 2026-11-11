@@ -5,14 +5,14 @@
 ; only required section. The Finish page's "run typors" box is also unchecked.
 ;
 ; Build:
-;   makensis /DVERSION=0.1.0 packaging\typors.nsi
+;   makensis /DVERSION=1.0.0 packaging\typors.nsi
 
 Unicode true
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
 
 !ifndef VERSION
-  !define VERSION "0.1.0"
+  !define VERSION "1.0.0"
 !endif
 
 Name "typors"
