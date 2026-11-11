@@ -2468,29 +2468,40 @@ fn collect_objects(
                     }
                 }
                 typors_core::doc::ObjectKind::Diagram { source } => {
-                    match media.diagram(source) {
-                        Ok(diagram) => objects.push(ObjectCmd::Svg {
+                    let scale = window.scale_factor().max(0.5);
+                    let width = (object.bounds.size.width.as_f32() * scale).round() as i32;
+                    let height = (object.bounds.size.height.as_f32() * scale).round() as i32;
+                    let renderer = cx.svg_renderer();
+                    if let Some(image) = media.diagram_image(source, width, height, &renderer) {
+                        objects.push(ObjectCmd::Image {
                             bounds: object.bounds,
-                            svg: diagram.svg.clone(),
-                        }),
-                        Err(error) => {
-                            let label = format!("mermaid 渲染失败：{error}");
-                            let line = metrics.shaped(
-                                &label,
-                                object.font_size,
-                                typors_core::Style::PLAIN,
-                                false,
-                                rgba(0xCF222EFF),
-                                false,
-                            );
-                            texts.push(TextCmd {
-                                origin: point(
-                                    object.bounds.left() + px(2.),
-                                    object.bounds.top() + px(2.),
-                                ),
-                                line_height: object.bounds.size.height,
-                                line,
-                            });
+                            image,
+                        });
+                    } else {
+                        match media.diagram(source) {
+                            Ok(diagram) => objects.push(ObjectCmd::Svg {
+                                bounds: object.bounds,
+                                svg: diagram.svg.clone(),
+                            }),
+                            Err(error) => {
+                                let label = format!("mermaid 渲染失败：{error}");
+                                let line = metrics.shaped(
+                                    &label,
+                                    object.font_size,
+                                    typors_core::Style::PLAIN,
+                                    false,
+                                    rgba(0xCF222EFF),
+                                    false,
+                                );
+                                texts.push(TextCmd {
+                                    origin: point(
+                                        object.bounds.left() + px(2.),
+                                        object.bounds.top() + px(2.),
+                                    ),
+                                    line_height: object.bounds.size.height,
+                                    line,
+                                });
+                            }
                         }
                     }
                 }

@@ -72,11 +72,15 @@ and assert their checks. Exit code 0 means every check passed.
   `<s>/<del>`, `<a>` and `<br>`.
 - **Mermaid**: fenced ```` ```mermaid ```` blocks render natively through
   [merman](https://github.com/Latias94/merman), a headless Rust Mermaid
-  implementation (no WebView, no Node). The build currently enables the flowchart
-  family; add more `diagram-*` features in `crates/typors-media/Cargo.toml` to
-  extend coverage.
-- **Not yet:** block-level HTML (`<div>`, `<p>`, ...), which needs an HTML/CSS
-  layout engine.
+  implementation (no WebView, no Node). All Mermaid diagram families compiled by
+  merman are enabled (flowchart, sequence, class, state, ER, gantt, pie, mindmap,
+  …); diagrams are rasterized at the box size so Mermaid's own colours survive.
+- **Block HTML**: tags are stripped and the common inline/block subset is mapped
+  to text, emphasis, links and line breaks (`<h1>`–`<h6>`, `<p>`, `<ul>/<li>`,
+  `<pre>`, `<br>`). There is no CSS box layout, so arbitrary `<div>` styling is not
+  reproduced.
+- **Still missing:** full HTML/CSS layout (a browser engine) if pixel-accurate HTML
+  is required.
 
 ## First-run Markdown association
 

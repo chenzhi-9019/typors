@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use gpui_kit::gpui::{
-    App, Image, ImageFormat, ImgResourceLoader, Pixels, RenderImage, Resource, Window, px,
+    App, DevicePixels, Image, ImageFormat, ImgResourceLoader, Pixels, RenderImage, Resource, Size,
+    SvgRenderer, SvgSize, Window, px,
 };
 use typors_core::doc::{Document, ObjectKind, SpanKind};
 use typors_media::mermaid::Diagram;
@@ -52,6 +53,7 @@ pub struct MediaContext {
     math: MathEngine,
     images: HashMap<String, ImageState>,
     diagrams: Mutex<HashMap<String, Result<Arc<Diagram>, String>>>,
+    diagram_images: Mutex<HashMap<(u64, i32, i32), Arc<RenderImage>>>,
     doc_dir: Option<PathBuf>,
     generation: u64,
 }
@@ -68,6 +70,7 @@ impl MediaContext {
             math: MathEngine::new(),
             images: HashMap::new(),
             diagrams: Mutex::new(HashMap::new()),
+            diagram_images: Mutex::new(HashMap::new()),
             doc_dir,
             generation: 0,
         }
@@ -105,6 +108,40 @@ impl MediaContext {
         rendered
     }
 
+    /// Rasterize a Mermaid SVG at the exact device size of its box, preserving
+    /// Mermaid's own colours (unlike `paint_svg`'s monochrome alpha mask).
+    pub fn diagram_image(
+        &self,
+        source: &str,
+        width: i32,
+        height: i32,
+        renderer: &SvgRenderer,
+    ) -> Option<Arc<RenderImage>> {
+        let width = width.clamp(1, 8192);
+        let height = height.clamp(1, 8192);
+        let key = (hash_str(source), width, height);
+        if let Ok(cache) = self.diagram_images.lock()
+            && let Some(hit) = cache.get(&key)
+        {
+            return Some(hit.clone());
+        }
+        let diagram = self.diagram(source).ok()?;
+        let parsed = renderer.parse_svg(diagram.svg.as_bytes()).ok()?;
+        let image = renderer
+            .render_parsed(
+                &parsed,
+                SvgSize::ExactSize(Size::new(DevicePixels(width), DevicePixels(height))),
+            )
+            .ok()?;
+        if let Ok(mut cache) = self.diagram_images.lock() {
+            if cache.len() > 32 {
+                cache.clear();
+            }
+            cache.insert(key, image.clone());
+        }
+        Some(image)
+    }
+
     pub fn image_state(&self, destination: &str) -> &ImageState {
         self.images
             .get(destination)
@@ -133,8 +170,14 @@ impl MediaContext {
     }
 }
 
-fn same_state(a: &ImageState, b: &ImageState) -> bool {
-    match (a, b) {
+fn hash_str(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn same_state(a: &ImageState, b: &ImageState) -> bool {    match (a, b) {
         (ImageState::Pending, ImageState::Pending) => true,
         (ImageState::Failed(x), ImageState::Failed(y)) => x == y,
         (

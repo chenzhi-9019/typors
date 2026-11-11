@@ -8,11 +8,7 @@ description = "typors rich-content engines: image sources and RaTeX math typeset
 
 [dependencies]
 base64.workspace = true
-merman = { version = "=0.9.3", default-features = false, features = [
-    "svg",
-    "diagram-flowchart",
-    "layout-cytoscape",
-] }
+merman = "=0.9.3"
 ratex-layout.workspace = true
 ratex-parser.workspace = true
 ratex-svg.workspace = true

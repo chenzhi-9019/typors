@@ -3948,6 +3948,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.21",
+ "unicode-general-category",
  "unicode-segmentation",
  "unicode-width",
  "url",
@@ -3965,6 +3966,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "merman-elk-layered"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e11bb3045c2766e1f7075be6cb1c820d03ff17c0c18bb4d70aeacd65c1c5e66a"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "merman-layout-elk"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "566aff5d42bf2ac7b813e0a50abe94ca9d44d9577a86b3af922cd7e8758c387e"
+dependencies = [
+ "merman-elk-layered",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "merman-render"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3979,9 +3999,15 @@ dependencies = [
  "libm",
  "manatee",
  "merman-core",
+ "merman-layout-elk",
  "merman-unicode-linebreak",
  "pulldown-cmark",
  "quick-xml 0.42.0",
+ "ratex-font",
+ "ratex-layout",
+ "ratex-parser",
+ "ratex-svg",
+ "ratex-types",
  "roughr-merman",
  "roxmltree 0.21.2",
  "rustc-hash 2.1.3",
@@ -7372,6 +7398,12 @@ name = "unicode-ccc"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce61d488bcdc9bc8b5d1772c404828b17fc481c0a582b5581e95fb233aef503e"
+
+[[package]]
+name = "unicode-general-category"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b993bddc193ae5bd0d623b49ec06ac3e9312875fdae725a975c51db1cc1677f"
 
 [[package]]
 name = "unicode-id"

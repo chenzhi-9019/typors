@@ -1259,7 +1259,9 @@ impl DocLayout {
     pub fn hit(&self, p: Point<Pixels>) -> Option<RenderHit> {
         let block_idx = self.block_at_y(p.y)?;
         let block = self.blocks.get(block_idx)?;
-        if block.spans.is_empty() {
+        let blank_gap = matches!(block.kind, BlockKind::Gap)
+            && block.display_text().chars().all(|ch| ch == '\n');
+        if block.spans.is_empty() || blank_gap {
             // A block without fragments — a run of blank lines, or a rule — has no
             // fragment to measure, but it still owns one line box per line. So the
             // click has to land on **the line it was made in**, not always on the
@@ -2431,23 +2433,23 @@ fn block_geometry(
                 )
             }
         }
-        // Out-of-scope syntax (task 3.2): raw HTML stays visible as
-        // plain monospace text instead of being swallowed or panicking.
+        // Block HTML is stripped to its text and inline styles at parse time;
+        // block-level HTML/CSS layout is not implemented yet.
         BlockKind::Html => Flow {
             metrics,
             media,
             theme,
             block,
             block_idx,
-            font_size: px(theme.body_size * theme.code_ratio),
-            line_height: px(theme.body_size * theme.code_ratio * theme.line_ratio),
+            font_size: px(theme.body_size),
+            line_height: px(theme.body_size * theme.line_ratio),
             left: page_left,
             right: page_right,
             top,
-            color: theme.muted,
+            color: theme.text,
             force_bold: false,
-            force_mono: true,
-            force_color: true,
+            force_mono: false,
+            force_color: false,
         }
         .run_mode(source_view, &mut spans, &mut objects),
     };

@@ -33,9 +33,15 @@ impl std::error::Error for DiagramError {}
 /// Render one Mermaid fence body. `Err` means the fence is not a Mermaid diagram
 /// this build can render; callers fall back to the source text.
 pub fn render(source: &str) -> Result<Diagram, DiagramError> {
+    // Mermaid's default flowchart labels are HTML (`<foreignObject>`), which
+    // usvg/GPUI does not paint. Disable them so Merman emits real `<text>`
+    // elements; sequence/class/state labels are already text.
+    let with_config = format!(
+        "%%{{init: {{\"htmlLabels\": false, \"flowchart\": {{\"htmlLabels\": false}}}}}}%%\n{source}"
+    );
     let output = Renderer::new()
         .render(RenderRequest::svg(
-            source,
+            &with_config,
             OperationControl::new(),
             SvgRequest::default(),
         ))
@@ -100,10 +106,31 @@ mod tests {
         let diagram = render("flowchart TD\n  A[Start] --> B[Done]").expect("diagram");
         assert!(diagram.svg.starts_with("<svg") || diagram.svg.contains("<svg"));
         assert!(diagram.width > 0.0 && diagram.height > 0.0);
+        assert!(
+            !diagram.svg.contains("<foreignObject"),
+            "flowchart labels must be SVG text/paths, not HTML"
+        );
+        assert!(diagram.svg.contains("<text"));
     }
 
     #[test]
     fn non_mermaid_source_is_an_error_not_a_panic() {
         assert!(render("this is not mermaid").is_err());
+    }
+
+    #[test]
+    fn all_compiled_diagram_families_render() {
+        for source in [
+            "sequenceDiagram\n  Alice->>Bob: Hi\n  Bob-->>Alice: Hello",
+            "classDiagram\n  class Animal\n  Animal : +String name",
+            "stateDiagram-v2\n  [*] --> Idle\n  Idle --> [*]",
+            "erDiagram\n  CUSTOMER ||--o{ ORDER : places",
+            "pie title Pets\n  \"Dogs\" : 3\n  \"Cats\" : 2",
+            "gantt\n  title A plan\n  section One\n  Task :a1, 2026-01-01, 3d",
+            "mindmap\n  root((root))\n    child",
+        ] {
+            let diagram = render(source).unwrap_or_else(|error| panic!("{source}: {error}"));
+            assert!(diagram.width > 0.0 && diagram.height > 0.0, "{source}");
+        }
     }
 }

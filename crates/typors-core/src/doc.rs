@@ -500,6 +500,139 @@ impl Walk {
             });
         }
     }
+
+    /// Strip block-level HTML tags, decode the common entities, and map the
+    /// visible text/styles back onto source ranges. This is a deliberately small
+    /// subset: headings/bold/italic/code/links/lists/breaks, no CSS box layout.
+    fn push_html_block(&mut self, range: Range<usize>, html: &str) {
+        let mut out: Vec<(Range<usize>, String, Style)> = Vec::new();
+        let mut style = self.style;
+        let mut stack: Vec<Style> = Vec::new();
+        let mut i = 0usize;
+        let mut text_start = 0usize;
+        let mut skip_depth = 0usize;
+        let len = html.len();
+        let flush = |out: &mut Vec<(Range<usize>, String, Style)>,
+                     text_start: usize,
+                     end: usize,
+                     style: Style| {
+            if text_start >= end {
+                return;
+            }
+            let raw = &html[text_start..end];
+            let decoded = decode_entities(raw);
+            if !decoded.is_empty() {
+                out.push((range.start + text_start..range.start + end, decoded, style));
+            }
+        };
+        while i < len {
+            if html.as_bytes()[i] == b'<' {
+                if text_start < i && skip_depth == 0 {
+                    flush(&mut out, text_start, i, style);
+                }
+                let Some(offset) = html[i..].find('>') else {
+                    break;
+                };
+                let end = i + offset + 1;
+                let tag = &html[i..end];
+                let lower = tag.to_ascii_lowercase();
+                let closing = lower.starts_with("</");
+                if lower.starts_with("<script") || lower.starts_with("<style") {
+                    skip_depth += 1;
+                } else if closing && (lower.starts_with("</script") || lower.starts_with("</style")) {
+                    skip_depth = skip_depth.saturating_sub(1);
+                } else if skip_depth == 0 {
+                    if closing {
+                        if let Some(previous) = stack.pop() {
+                            style = previous;
+                        }
+                        if matches!(
+                            lower.trim_end_matches('>').trim_start_matches("</"),
+                            "p" | "div" | "li" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                        ) {
+                            out.push((range.start + i..range.start + end, "\n".to_string(), style));
+                        }
+                    } else if lower.starts_with("<br") {
+                        out.push((range.start + i..range.start + end, "\n".to_string(), style));
+                    } else if lower.starts_with("<b")
+                        || lower.starts_with("<strong")
+                        || lower.starts_with("<i")
+                        || lower.starts_with("<em")
+                        || lower.starts_with("<code")
+                        || lower.starts_with("<kbd")
+                        || lower.starts_with("<s>")
+                        || lower.starts_with("<del")
+                        || lower.starts_with("<a")
+                        || lower.starts_with("<pre")
+                    {
+                        stack.push(style);
+                        if lower.starts_with("<b") || lower.starts_with("<strong") {
+                            style.bold = true;
+                        } else if lower.starts_with("<i") || lower.starts_with("<em") {
+                            style.italic = true;
+                        } else if lower.starts_with("<code")
+                            || lower.starts_with("<kbd")
+                            || lower.starts_with("<pre")
+                        {
+                            style.code = true;
+                        } else if lower.starts_with("<s>") || lower.starts_with("<del") {
+                            style.strike = true;
+                        } else {
+                            style.link = true;
+                        }
+                    } else if lower.starts_with("<li") {
+                        out.push((range.start + i..range.start + end, "• ".to_string(), style));
+                    } else if matches!(
+                        lower.trim_end_matches('>').trim_start_matches('<'),
+                        "p" | "div" | "tr" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+                    ) {
+                        out.push((range.start + i..range.start + end, "\n".to_string(), style));
+                    }
+                }
+                i = end;
+                text_start = i;
+                continue;
+            }
+            i += 1;
+        }
+        if text_start < len && skip_depth == 0 {
+            flush(&mut out, text_start, len, style);
+        }
+        let first = out
+            .iter()
+            .position(|(_, content, _)| !content.trim().is_empty());
+        let last = out
+            .iter()
+            .rposition(|(_, content, _)| !content.trim().is_empty());
+        let out = match (first, last) {
+            (Some(first), Some(last)) => &out[first..=last],
+            _ => &out[..0],
+        };
+        let mut last_was_newline = false;
+        for (src, content, style) in out {
+            if content.trim().is_empty() && content != "\n" {
+                continue;
+            }
+            if content == "\n" {
+                if last_was_newline {
+                    continue;
+                }
+                last_was_newline = true;
+            } else {
+                last_was_newline = false;
+            }
+            self.push_covered(src.clone(), content.clone(), *style);
+        }
+    }
+}
+
+fn decode_entities(raw: &str) -> String {
+    raw.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
 }
 
 /// The small, safe inline-HTML subset typors renders instead of showing raw
@@ -656,7 +789,8 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                     walk.open_block(BlockKind::BlockQuote);
                 }
                 Tag::HtmlBlock => {
-                    walk.open_block(BlockKind::Html);
+                    let idx = walk.open_block(BlockKind::Html);
+                    walk.builders[idx].fallback = Some(range.clone());
                 }
                 Tag::Table(_) => {
                     walk.open_block(BlockKind::Table);
@@ -761,7 +895,7 @@ fn parse_blocks(text: &str) -> Vec<Block> {
                 }
             }
             Event::Html(s) => {
-                walk.push_covered(range, s.to_string(), walk.style);
+                walk.push_html_block(range, &s);
             }
             Event::InlineHtml(s) => match inline_html_action(&s, walk.style) {
                 InlineHtml::Open(style) => {
@@ -1308,8 +1442,28 @@ mod tests {
         );
     }
 
-    /// 3.3 - one image syntax becomes exactly one object, with alt/title/dest
-    /// captured and the inner Markdown markers folded away.
+    /// Block HTML is stripped to visible text and inline styles; tags themselves
+    /// must not appear in the render projection.
+    #[test]
+    fn html_blocks_strip_tags_and_keep_text() {
+        let text = "<div><h2>标题</h2><p>正文 <b>粗体</b> 与 <i>斜体</i><br>下一行</p></div>\n";
+        let doc = Document::parse(text);
+        let rendered: String = doc
+            .blocks()
+            .iter()
+            .map(|block| block.render.as_str())
+            .collect();
+        assert!(rendered.contains("标题"), "{rendered:?}");
+        assert!(rendered.contains("粗体"), "{rendered:?}");
+        assert!(rendered.contains("斜体"), "{rendered:?}");
+        assert!(!rendered.contains('<'), "tags survived: {rendered:?}");
+        for s in 0..=doc.len_bytes() {
+            let pos = doc.src_to_render(s);
+            assert_eq!(doc.render_to_src(&pos), Some(doc.snap_floor(s)), "offset {s}");
+        }
+    }
+
+    /// 3.3 - one image syntax becomes exactly one object, with alt/title/dest    /// captured and the inner Markdown markers folded away.
     #[test]
     fn images_become_one_atomic_object() {
         let text = "前 ![alt *em*](<my image.png> \"标题\") 后\n";

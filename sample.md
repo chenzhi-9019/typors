@@ -31,6 +31,12 @@ flowchart LR
   A[写 Markdown] --> B[原生布局] --> C[矢量渲染]
 ```
 
+```mermaid
+sequenceDiagram
+  Alice->>Bob: 原生渲染
+  Bob-->>Alice: 无需浏览器
+```
+
 | 列一 | 列二 |
 |---|---|
 | 1 | 2 |
