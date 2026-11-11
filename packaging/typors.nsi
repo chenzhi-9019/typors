@@ -144,6 +144,7 @@ Function ScopePageLeave
 FunctionEnd
 
 Function .onInit
+  SetRegView 64
   ClearErrors
   ${GetOptions} $CMDLINE "/ELEVATED=" $0
   ${If} $0 == "1"
@@ -174,6 +175,7 @@ Function .onInit
 FunctionEnd
 
 Function un.onInit
+  SetRegView 64
   ; An all-users uninstall needs elevation to remove Program Files/HKLM entries.
   ${GetOptions} $CMDLINE "/ELEVATED=" $0
   ${If} $0 != "1"
