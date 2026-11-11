@@ -63,6 +63,9 @@ and assert their checks. Exit code 0 means every check passed.
 | `--dump-perf` | Frame-cost sweep (P0–P9) |
 | `--dump-blank` | Empty-document block/caret/typing/Enter contract (B1–B4); no file argument |
 | `--dump-menu` | Menu model labels, item order and commands |
+| `--dump-blink` | Caret blink phases, reset and disabled mode |
+| `--dump-completion` | Markdown snippet catalog and no-match boundary |
+| `--dump-settings` | Defaults, validation, save/load and corrupt recovery |
 
 ## Menu bar
 

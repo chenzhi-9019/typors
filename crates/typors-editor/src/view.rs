@@ -805,12 +805,7 @@ impl MarkdownView {
 
     /// Apply blink settings without restarting the view.
     pub fn set_blink(&mut self, enabled: bool, interval_ms: u64, cx: &mut Context<Self>) {
-        self.blink_enabled = enabled;
-        self.blink_interval_ms = interval_ms.clamp(300, 1200);
-        if !enabled {
-            self.caret_visible = true;
-        }
-        self.reset_blink();
+        self.apply_blink_config(enabled, interval_ms);
         cx.notify();
     }
 
@@ -822,6 +817,39 @@ impl MarkdownView {
 
     pub fn caret_visible(&self) -> bool {
         self.caret_visible
+    }
+
+    /// Blink configuration without a `Context`; `set_blink` is this plus notify.
+    pub fn apply_blink_config(&mut self, enabled: bool, interval_ms: u64) {
+        self.blink_enabled = enabled;
+        self.blink_interval_ms = interval_ms.clamp(300, 1200);
+        if !enabled {
+            self.caret_visible = true;
+        }
+        self.reset_blink();
+    }
+
+    pub fn blink_enabled(&self) -> bool {
+        self.blink_enabled
+    }
+
+    pub fn blink_interval_ms(&self) -> u64 {
+        self.blink_interval_ms
+    }
+
+    pub fn blink_generation(&self) -> u64 {
+        self.blink_generation
+    }
+
+    /// Flip one blink phase without waiting for the wall clock. Only probes and
+    /// unit tests call this; the real timer uses the same field.
+    #[doc(hidden)]
+    pub fn advance_blink_phase(&mut self) {
+        if self.blink_enabled {
+            self.caret_visible = !self.caret_visible;
+        } else {
+            self.caret_visible = true;
+        }
     }
 
     /// Replace the whole document (New/Open) and reset every piece of state that

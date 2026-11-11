@@ -2122,3 +2122,90 @@ pub fn live_preview_probe(view: &mut MarkdownView) -> ProbeCapture {
     ));
     ProbeCapture { report, checks }
 }
+
+/// `--dump-blink`: deterministic blink phases and configuration.
+pub fn blink_probe(view: &mut MarkdownView) -> ProbeCapture {
+    let mut checks: Vec<(String, bool, String)> = Vec::new();
+    let mut report = String::from("# blink probe\n");
+    let start_gen = view.blink_generation();
+    view.apply_blink_config(true, 530);
+    let visible = view.caret_visible();
+    view.advance_blink_phase();
+    let hidden = view.caret_visible();
+    view.advance_blink_phase();
+    let visible_again = view.caret_visible();
+    view.advance_blink_phase();
+    view.reset_blink();
+    let reset = view.caret_visible();
+    let generation_advanced = view.blink_generation() > start_gen;
+    checks.push((
+        "BL1 530 ms phases: visible -> hidden -> visible".to_string(),
+        visible && !hidden && visible_again && reset && generation_advanced,
+        format!(
+            "visible={visible} hidden={hidden} again={visible_again} reset={reset} generation={}",
+            view.blink_generation()
+        ),
+    ));
+    view.apply_blink_config(false, 900);
+    checks.push((
+        "BL2 disabled mode forces the caret visible".to_string(),
+        view.caret_visible() && !view.blink_enabled(),
+        format!(
+            "enabled={} visible={}",
+            view.blink_enabled(),
+            view.caret_visible()
+        ),
+    ));
+    view.apply_blink_config(true, 50);
+    checks.push((
+        "BL3 interval clamps to the supported range".to_string(),
+        (300..=1200).contains(&view.blink_interval_ms()),
+        format!("interval={}", view.blink_interval_ms()),
+    ));
+    report.push_str(&format!(
+        "blink: enabled={} interval={}ms visible={}\n",
+        view.blink_enabled(),
+        view.blink_interval_ms(),
+        view.caret_visible()
+    ));
+    ProbeCapture { report, checks }
+}
+
+/// `--dump-completion`: the Markdown snippet catalog and its boundaries.
+pub fn completion_probe(_view: &MarkdownView) -> ProbeCapture {
+    use typors_core::Document;
+    let mut checks: Vec<(String, bool, String)> = Vec::new();
+    let mut report = String::from("# completion probe\n");
+    let heading = Document::parse("##");
+    let state = typors_editor::suggest_completion(&heading, 2);
+    let ok_heading = state
+        .as_ref()
+        .is_some_and(|state| state.items.first().is_some_and(|item| item.insert == "## "));
+    checks.push((
+        "CO1 '##' suggests a level-2 heading".to_string(),
+        ok_heading,
+        format!("{state:?}"),
+    ));
+    let fence = Document::parse("```");
+    let fence_state = typors_editor::suggest_completion(&fence, 3);
+    let ok_fence = fence_state.as_ref().is_some_and(|state| {
+        state
+            .items
+            .first()
+            .is_some_and(|item| item.insert == "```\n\n```")
+    });
+    checks.push((
+        "CO2 '```' suggests a fenced code block".to_string(),
+        ok_fence,
+        format!("{fence_state:?}"),
+    ));
+    let prose = Document::parse("ordinary prose");
+    let none = typors_editor::suggest_completion(&prose, prose.len_bytes()).is_none();
+    checks.push((
+        "CO3 ordinary prose has no suggestion".to_string(),
+        none,
+        "no popup".to_string(),
+    ));
+    report.push_str("completion catalog: heading/fence/no-match\n");
+    ProbeCapture { report, checks }
+}

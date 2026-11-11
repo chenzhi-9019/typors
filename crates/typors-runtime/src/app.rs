@@ -69,6 +69,9 @@ enum Mode {
     DumpNewlines(Option<(usize, usize)>),
     DumpMedia,
     DumpLivePreview,
+    DumpBlink,
+    DumpCompletion,
+    DumpSettings,
     DumpBlank,
     DumpMenu,
 }
@@ -86,6 +89,9 @@ pub fn run() {
             "--dump-perf" => mode = Mode::DumpPerf,
             "--dump-media" => mode = Mode::DumpMedia,
             "--dump-live-preview" => mode = Mode::DumpLivePreview,
+            "--dump-blink" => mode = Mode::DumpBlink,
+            "--dump-completion" => mode = Mode::DumpCompletion,
+            "--dump-settings" => mode = Mode::DumpSettings,
             "--dump-blank" => mode = Mode::DumpBlank,
             "--dump-menu" => mode = Mode::DumpMenu,
             "--dump-newlines" => {
@@ -169,6 +175,9 @@ pub fn run() {
         Mode::DumpNewlines(target) => dump_newlines(source, doc, target),
         Mode::DumpMedia => dump_media(source, doc),
         Mode::DumpLivePreview => run_probe(source, doc, ProbeKind::LivePreview),
+        Mode::DumpBlink => run_probe(source, doc, ProbeKind::Blink),
+        Mode::DumpCompletion => run_probe(source, doc, ProbeKind::Completion),
+        Mode::DumpSettings => dump_settings(),
         Mode::DumpBlank => dump_blank(source, doc),
         Mode::DumpMenu => dump_menu(),
     }
@@ -227,6 +236,66 @@ fn dump_blank(source: Option<PathBuf>, doc: Document) {
     }
 }
 
+fn dump_settings() {
+    use typors_settings::Settings;
+    let mut checks: Vec<(String, bool, String)> = Vec::new();
+    let defaults = Settings::default();
+    checks.push((
+        "S1 defaults are valid".to_string(),
+        defaults.validate().is_empty(),
+        format!("{:?}", defaults.validate()),
+    ));
+    let mut bad = defaults.clone();
+    bad.appearance.page_width = 100.0;
+    checks.push((
+        "S2 invalid page width is rejected".to_string(),
+        !bad.validate().is_empty(),
+        format!("{:?}", bad.validate()),
+    ));
+    let mut fixed = defaults.clone();
+    fixed.appearance.page_width = 1000.0;
+    checks.push((
+        "S3 a corrected value validates".to_string(),
+        fixed.validate().is_empty(),
+        format!("{:?}", fixed.validate()),
+    ));
+    let dir = std::env::temp_dir().join(format!("typors-settings-probe-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("settings.json");
+    let saved = fixed.save_to(&path).is_ok();
+    let loaded = Settings::load_from(&path);
+    checks.push((
+        "S4 save/load round-trip".to_string(),
+        saved && loaded.0 == fixed && loaded.1.is_none(),
+        format!("saved={saved} loaded={:?}", loaded.1),
+    ));
+    if let Err(error) = std::fs::write(&path, "{not json") {
+        checks.push((
+            "S5 corrupt file recovery".to_string(),
+            false,
+            error.to_string(),
+        ));
+    } else {
+        let (recovered, warning) = Settings::load_from(&path);
+        checks.push((
+            "S5 corrupt file recovers defaults with a warning".to_string(),
+            recovered == defaults && warning.is_some(),
+            format!("warning={warning:?}"),
+        ));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    let ok = checks.iter().all(|(_, ok, _)| *ok);
+    println!("# settings dump\n");
+    for (name, pass, detail) in &checks {
+        println!(
+            "  [{}] {name} — {detail}",
+            if *pass { "ok" } else { "FAIL" }
+        );
+    }
+    println!("\nresult: {}", if ok { "PASS" } else { "FAIL" });
+    std::process::exit(if ok { 0 } else { 1 });
+}
+
 fn parse_target(raw: &str) -> Option<(usize, usize)> {
     let (block, byte) = raw.split_once(':')?;
     Some((block.parse().ok()?, byte.parse().ok()?))
@@ -248,7 +317,7 @@ fn load(path: Option<String>) -> (Option<PathBuf>, String) {
             eprintln!(
                 "usage: typors \
                  [--dump-layout|--dump-cursor [<block>:<byte>]|--dump-edit|--dump-newlines \
-                 [<block>:<byte>]|--dump-ime|--dump-select|--dump-perf|--dump-blank|--dump-menu] [<file.md>]"
+                 [<block>:<byte>]|--dump-ime|--dump-select|--dump-perf|--dump-blank|--dump-menu|--dump-blink|--dump-completion|--dump-settings] [<file.md>]"
             );
             (None, String::new())
         }
@@ -543,6 +612,8 @@ enum ProbeKind {
     Cursor(Option<(usize, usize)>),
     Edit,
     LivePreview,
+    Blink,
+    Completion,
 }
 
 /// Run one of the group-4 probes against the same view the window paints.
@@ -557,6 +628,8 @@ fn run_probe(source: Option<PathBuf>, doc: Document, kind: ProbeKind) {
         ProbeKind::Cursor(_) => "cursor probe",
         ProbeKind::Edit => "edit probe",
         ProbeKind::LivePreview => "live-preview probe",
+        ProbeKind::Blink => "blink probe",
+        ProbeKind::Completion => "completion probe",
     };
     let holder: Arc<Mutex<Option<Entity<MarkdownView>>>> = Arc::new(Mutex::new(None));
     let capture: Arc<Mutex<Option<ProbeCapture>>> = Arc::new(Mutex::new(None));
@@ -649,6 +722,8 @@ fn run_kind(kind: &ProbeKind, view: &mut MarkdownView) -> ProbeCapture {
         ProbeKind::Cursor(target) => probe::cursor_probe(view, *target),
         ProbeKind::Edit => probe::edit_probe(view),
         ProbeKind::LivePreview => probe::live_preview_probe(view),
+        ProbeKind::Blink => probe::blink_probe(view),
+        ProbeKind::Completion => probe::completion_probe(view),
     }
 }
 

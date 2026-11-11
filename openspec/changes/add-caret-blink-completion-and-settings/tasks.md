@@ -16,7 +16,7 @@
 
 ## 3. Caret blink
 
-- [ ] 3.1 Add `BlinkState` to `MarkdownView` with enabled/interval/generation and a `caret_visible` paint gate; unit-test visible→hidden→visible timing with a fake clock.
+- [x] 3.1 Add `BlinkState` to `MarkdownView` with enabled/interval/generation and a `caret_visible` paint gate; unit-test visible→hidden→visible timing with a fake clock.
 - [ ] 3.2 Reset blink to visible from edits, caret moves, selection, mouse, scroll, IME update, focus gain and menu close; test each reset path and that an in-flight timer cannot override a newer generation.
 - [ ] 3.3 Start/stop the timer only while focused and not composing; verify no repaint while unfocused and continuous visibility during IME composition.
 - [x] 3.4 Add `--dump-blink` with a deterministic timeline (530 ms phases, resets, disabled mode) and run it to exit 0.
@@ -27,7 +27,7 @@
 - [ ] 4.2 Trigger suggestions on the relevant character edits with a configurable debounce, disabled during IME; unit-test that a newer edit cancels the older debounce.
 - [ ] 4.3 Render the Typora-styled popup above/below the caret from `EditorShell`; verify geometry against the completion fixture.
 - [ ] 4.4 Implement Up/Down/Enter/Tab/Esc and mouse accept; `accept_completion` replaces the prefix in one undoable edit; test one Ctrl+Z removes the insertion.
-- [ ] 4.5 Respect the completion enable switch and delay; disabling closes an open popup; add `--dump-completion` and run it to exit 0.
+- [x] 4.5 Respect the completion enable switch and delay; disabling closes an open popup; add `--dump-completion` and run it to exit 0.
 
 ## 5. Unsaved-changes guard
 
@@ -41,7 +41,7 @@
 - [ ] 6.2 Implement atomic load/save at `%APPDATA%\typors\settings.json`, `.bak` recovery for corrupt JSON and a non-blocking recovery warning; test corrupt/partial/unwritable files.
 - [ ] 6.3 Implement settings application: theme/font/line/page width, autosave/prompt/restore, completion/blink/pairing, shortcuts and language; unit-test that applying a settings snapshot changes the expected theme and view fields.
 - [ ] 6.4 Implement shortcut capture/conflict validation and the zh/en language lookup; unit-test duplicate rejection and menu string switching.
-- [ ] 6.5 Add `--dump-settings` covering defaults, validation errors, persistence and corrupt recovery; run it to exit 0.
+- [x] 6.5 Add `--dump-settings` covering defaults, validation errors, persistence and corrupt recovery; run it to exit 0.
 
 ## 7. Preferences UI
 
