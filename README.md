@@ -1,127 +1,126 @@
 # typors
 
 A hybrid Markdown editor: the document is drawn in its **render** projection
-(headings without `#`, emphasis without `**`, list bullets instead of `- `),
-while the one block that holds the caret is drawn as **Markdown source**. One
-`ropey` buffer is the only truth; the two projections are views of it.
+(headings without `#`, emphasis without `**`, list bullets instead of `- `), while
+the one block that holds the caret is drawn as **Markdown source**. One `ropey`
+buffer is the only truth; the two projections are views of it.
 
-This crate is the product. `spike/` is the research probe the editor was proved
-in, and it stays in the tree; see *Relation to `spike/`* below.
-
-## Layout
+## Workspace layout
 
 | Path | What it is |
 | --- | --- |
-| `src/doc.rs` | The buffer: parse into blocks and spans, byte <-> render mapping |
-| `src/render.rs` | Render-projection geometry: block boxes, fragments, byte <-> x, caches, viewport culling |
-| `src/view.rs` | The self-drawn GPUI `Element`, the caret, the one text-mutation entry point |
-| `src/ime.rs` | The Windows input-method channel: composition buffer, callback log, `--dump-ime` |
-| `src/selection.rs` | Selection, highlight geometry, undo/redo, `--dump-select` |
-| `src/perf.rs` | Frame-cost sweep and the geometry-equality checks (`--dump-perf`) |
-| `src/probe.rs` | The programmatic caret / hit-test / typing probes (`--dump-cursor`, `--dump-edit`) |
-| `src/sample.rs` | Deterministic sample-document generator (used by tests and probes) |
-| `src/main.rs` | Modes: window, `--fps`, and the `--dump-*` probe channels |
-| `src/bin/dump.rs` | `cargo run --release --bin dump -- sample.md`: the raw block/span table |
-| `build.rs` | Embeds the Windows `VERSIONINFO` block and the icon |
-| `assets/typors.ico` | Application icon (16/32/48/256), an original placeholder |
-| `tools/make-icon.ps1` | Regenerates `assets/typors.ico`; `-PreviewPath` saves a PNG of the mark |
-| `sample.md` | The document every dump mode is normally run against |
+| `crates/typors-core` | The buffer: parse into blocks and spans, byte <-> render mapping, sample generator |
+| `crates/typors-media` | Image-source classification and the RaTeX math engine (no GPUI) |
+| `crates/typors-render` | Render-projection geometry: block boxes, fragments, objects, tables, caches |
+| `crates/typors-editor` | Self-drawn GPUI `Element`, caret, input/IME, selection, undo |
+| `crates/typors-probes` | `--dump-*` probes and the frame-cost sweep |
+| `crates/typors-runtime` | `cdylib`: window, modes, shell registration (the bulk of the program) |
+| `crates/typors-app` | Tiny loader `typors.exe` + the `dump` inspection binary |
+| `crates/typors-spike` | M0 research record; independent regression reference |
+| `assets/` | Runtime resources (icon, sample image) — not embedded in the EXE |
+| `packaging/` | NSIS installer (`typors.nsi`) |
+
+`typors.exe` loads `typors_runtime.dll` from its own directory. The DLL owns GPUI,
+the editor and the first-run shell registration; the EXE only calls its
+`typors_run` export. That is what keeps the EXE around 145 KB.
 
 ## Build
 
 ```powershell
-cd typors
-cargo build --release          # -> target\release\typors.exe
-cargo test --release           # 30 unit tests
+cargo build --release --workspace      # builds typors.exe + typors_runtime.dll
+cargo test --workspace
 ```
 
-That executable is the installer payload; keep the path stable.
+The executable and DLL must stay side by side:
 
-Windows only, in practice: the resource embedding in `build.rs` is a no-op on
-other targets, but GPUI itself is what pins the platform support here.
-
-Dependencies are deliberately fixed: `gpui-kit`, `gpui-fps`, `ropey`,
-`pulldown-cmark`, plus `winresource` as a **build**-dependency. Nothing else is
-added at runtime; `gpui-pre` is never declared directly (GPUI comes through the
-Kit facade).
+```text
+target\release\typors.exe
+target\release\typors_runtime.dll
+```
 
 ## Running
 
 ```powershell
-cargo run --release -- sample.md                    # window: click, type, arrows
-cargo run --release -- --fps sample.md              # ... with the gpui-fps HUD
+target\release\typors.exe sample.md
+target\release\typors.exe --dump-layout sample.md
 ```
 
-### Probe modes
+`--dump-*` modes open the real window, paint one frame, print what they measured
+and assert their checks. Exit code 0 means every check passed.
 
-Each `--dump-*` mode opens the real window, paints one frame, then prints what
-it measured and asserts its checks. **Exit code 0 means every check passed**;
-a failing check prints `[fail] ...` and exits non-zero.
+| Mode | What it checks |
+| --- | --- |
+| `--dump-layout` | Block boxes, painted fragments, objects, A1–A5 |
+| `--dump-media` | Image/math/table objects, source mapping, M1–M5 |
+| `--dump-cursor` | Caret, hit testing, keyboard movement (C1–C6) |
+| `--dump-edit` | Typing/deleting (E1–E4) |
+| `--dump-ime` | Input-method callback sequence (I0–I8) |
+| `--dump-select` | Selection, clipboard, undo (S1–S9) |
+| `--dump-newlines` | Enter/newline handling (N0–N6) |
+| `--dump-perf` | Frame-cost sweep (P0–P9) |
+
+## Rich content
+
+- Images: local relative/absolute paths, `http(s)://` URLs and `data:` URIs, with
+  placeholders while loading and a visible reason on failure.
+- Math: inline `$...$` and display `$$...$$` through RaTeX, rendered as vector
+  paths.
+- GFM tables: grid, tinted header row, per-cell text; column alignment/colspan are
+  not implemented yet.
+- Strikethrough `~~...~~`.
+- Inline HTML subset: `<b>/<strong>`, `<i>/<em>`, `<code>/<kbd>/<samp>`,
+  `<s>/<del>`, `<a>` and `<br>`.
+- **Not yet:** mermaid diagrams and block-level HTML (`<div>`, `<p>`, ...); these
+  need either a WebView or a native layout engine.
+
+## First-run Markdown association
+
+On the first normal launch the DLL asks whether to register typors as a Markdown
+handler. It writes the per-user `HKCU\Software\Classes` entries and opens Windows
+*Default Apps*; Windows 10/11 still require the user to confirm the default there
+(the `UserChoice` hash is user-owned).
+
+The installer can do it without the prompt:
 
 ```powershell
-cargo run --release -- --dump-layout  sample.md     # block boxes, painted fragments (A1-A5)
-cargo run --release -- --dump-cursor  sample.md     # caret, hit testing, key handling (C1-C6)
-cargo run --release -- --dump-cursor  4:0 sample.md # ... with the caret placed at block 4, byte 0
-cargo run --release -- --dump-edit    sample.md     # typing/deleting (E1-E4)
-cargo run --release -- --dump-ime     sample.md     # input-method callback sequence (I0-I8)
-cargo run --release -- --dump-select  sample.md     # selection, clipboard, undo (S1-S9)
-cargo run --release -- --dump-newlines sample.md    # Enter/newline handling and blank lines (N0-N1)
-cargo run --release -- --dump-perf    sample.md     # frame-cost sweep (P0-P9)
+typors.exe --register
+typors.exe --unregister
 ```
 
-`--dump-perf` sweeps 24 scroll positions plus typing at the end of the document;
-on a 100k-character file it reports the min/median/p95/max of each relayout and
-counts pauses over 100 ms. `--dump-layout` also prints per-block timing.
+## Installer (NSIS)
 
-The probes are the regression evidence for the editor's behaviour. They are
-part of the product binary on purpose: after a change, run them and compare.
+```powershell
+cargo build --release --workspace
+pwsh packaging\build-nsis.ps1
+# -> packaging\dist\typors-0.1.0-setup.exe
+```
 
-### Environment variables
+The installer's optional sections (file association, desktop shortcut, Start-menu
+shortcut) are **all unchecked**; the user chooses. The core files are the only
+required section, and the Finish page's "run" box is unchecked too.
 
-All of them are debug/probe hooks; none is needed to use the editor.
+The old Inno Setup script (`packaging\typors.iss`) is kept only as history; NSIS
+is the supported path.
+
+## Environment variables
+
+All are debug/probe hooks; none is needed to use the editor.
 
 | Variable | Effect |
 | --- | --- |
-| `TYPORS_IME_LOG=off` (or `0`) | Silence the per-callback IME log on stderr |
+| `TYPORS_IME_LOG=off` | Silence the per-callback IME log on stderr |
 | `TYPORS_EDIT_LOG=1` | One structured line per buffer change |
 | `TYPORS_SCROLL=<px>` | Scroll the page to that document offset on the first frame |
-| `TYPORS_CULL_LOG=1` | Print the culling band and shaped/culled fragment counts per frame |
-| `TYPORS_EXIT_DUMP=<ms>` | After that many ms, print buffer + caret and quit (drives a real window from outside) |
+| `TYPORS_CULL_LOG=1` | Print the culling band and shaped/culled fragment counts |
+| `TYPORS_EXIT_DUMP=<ms>` | After that many ms, print buffer + caret and quit |
 
-## Windows resources
+## Dependencies
 
-`build.rs` embeds, via `winresource`:
-
-- the icon (`assets/typors.ico`) — file icon, taskbar, Alt-Tab;
-- `VERSIONINFO`: `ProductName=typors`, `FileDescription=typors`,
-  `FileVersion=0.1.0`, `ProductVersion=0.1.0`,
-  `OriginalFilename=typors.exe`, `LegalCopyright=Copyright © 2026 typors`.
-
-Check them with:
-
-```powershell
-(Get-Item typors\target\release\typors.exe).VersionInfo
-```
-
-The icon is an **original placeholder**: a geometric lower-case "t" on a navy
-plate with a mint baseline caret, drawn by `tools/make-icon.ps1`. It is not
-derived from any other product's icon, palette or typeface. Replacing it means
-overwriting `assets/typors.ico` (16/32/48/256, 32-bit DIB) and rebuilding.
+`gpui-kit 0.8.0` (pins `gpui-pre 0.3.9`), `gpui-fps 0.8.0`, `pulldown-cmark
+0.13.5`, `ropey 2.0.0-beta.1`, `ratex-* 0.1.15`, `base64 0.22.1`, `winreg
+0.56.0`. Versions are pinned in the workspace `Cargo.toml`.
 
 ## Relation to `spike/`
 
-`spike/` was the M0 feasibility probe: it answers whether the hybrid projection
-is fast enough and whether the GPUI APIs can carry it. Its `findings.md` holds
-the measurements and the API facts, and its test suite is the same 30 tests.
-
-This crate is the same editor in a shipping shell: the modules were **copied**
-from `spike/src/` unchanged, and only the crate name, the binary name, the
-window title and the log prefix changed. No behaviour was touched.
-
-The two copies therefore coexist for now — that is deliberate. `spike/` is kept
-as the research record and as an independent regression reference (it builds and
-tests on its own); converging them into one crate is M1 work, and doing it now
-would invalidate the probe evidence before the product has its own baseline.
-
-Consequence to keep in mind: a fix applied here must be applied there too until
-the convergence happens.
+`crates/typors-spike` is the M0 feasibility probe kept as a research record and
+an independent regression reference. It does not depend on the product crates.
