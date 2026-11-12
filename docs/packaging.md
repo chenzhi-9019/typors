@@ -32,7 +32,7 @@ README.md
 ```powershell
 pwsh packaging\build-nsis.ps1
 # or: pwsh packaging\build-nsis.ps1 -Version 0.2.0
-# -> packaging\dist\typors-1.0.3-setup.exe
+# -> packaging\dist\typors-1.0.4-setup.exe
 ```
 
 The script passes `/INPUTCHARSET UTF8` to `makensis` because the script and the
@@ -61,7 +61,7 @@ Uninstall detects the scope from the machine key and elevates for all-users.
 
 ```powershell
 $dir = "$env:TEMP\typors-install-test"
-.\packaging\dist\typors-1.0.3-setup.exe /S /SCOPE=me /D=$dir
+.\packaging\dist\typors-1.0.4-setup.exe /S /SCOPE=me /D=$dir
 & "$dir\typors.exe" --dump-media "$dir\sample.md"
 & "$dir\uninstall.exe" /S
 ```

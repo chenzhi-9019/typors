@@ -663,6 +663,9 @@ pub struct BlockBox {
     /// it has no paint commands. A block that is visible in a frame is always
     /// measured before that frame paints.
     pub measured: bool,
+    /// Height of a trailing empty line reserved for the caret after the block's
+    /// final newline, or zero. See [`DocLayout::ensure_caret_line`].
+    pub extra_caret_line: Pixels,
 }
 
 /// One visual line of a block, exposed for caret and hit testing.
@@ -1581,74 +1584,66 @@ impl DocLayout {
     }
 
 
-    /// Give the caret a line box when it sits after the final newline of the
-    /// source-projected block.
+    /// Reserve the empty line the caret sits on after Enter at the end of the
+    /// document.
     ///
-    /// A paragraph owns its terminating newline, but the flow draws only its
-    /// non-empty lines: "hello\n" is one block whose visible text is "hello".
-    /// After Enter the caret is at the block end, past that newline, and belongs
-    /// on a new empty line — every editor shows it. Without this the caret maps
-    /// to a second line the block box does not contain, so the page does not grow
-    /// and the first Enter looks like it did nothing (the second one only works
-    /// because it creates a real gap block).
+    /// A block owns its terminating newline in the source, but drawing either
+    /// projection drops that final empty line (a trailing newline terminates the
+    /// last line, it does not open one). After Enter the caret is at the block
+    /// end, past that newline; without this line box it is drawn on the last text
+    /// line and the page never grows, so the first Enter looks like it did
+    /// nothing and only a second newline (which creates a gap block) shows a line
+    /// break. The reserved line uses body text height, so a heading followed by a
+    /// new paragraph does not jump when that gap block appears.
     ///
-    /// Returns true when the layout grew by one or more line boxes.
-    pub fn ensure_caret_line(
-        &mut self,
-        caret: Option<usize>,
-        source_block: Option<usize>,
-    ) -> bool {
-        let (Some(caret), Some(block_idx)) = (caret, source_block) else {
+    /// Returns true when a line was reserved.
+    pub fn ensure_caret_line(&mut self, doc: &Document, caret: Option<usize>) -> bool {
+        let Some(caret) = caret else {
+            return false;
+        };
+        let Some(block_idx) = doc.block_at_src(caret) else {
             return false;
         };
         let Some(block) = self.blocks.get(block_idx) else {
             return false;
         };
-        // Only the position after the block's own final newline needs the extra
-        // line; every earlier position already owns a line.
-        if caret != block.src.end || block.src.end <= block.src.start {
+        let Some(source) = doc.blocks().get(block_idx) else {
+            return false;
+        };
+        // Only the document's last block can own a caret position after its own
+        // terminating newline: any other block has a following block or gap that
+        // starts at that offset and would own the caret instead.
+        if block_idx + 1 != self.blocks.len()
+            || caret != source.src.end
+            || source.src.end <= source.src.start
+        {
             return false;
         }
-        let text = block.source_text.as_deref().unwrap_or(&block.render);
-        if !text.ends_with('\n') {
+        if block.extra_caret_line.as_f32() > 0.5 {
             return false;
         }
-        // A blank run (a Gap of newlines) already draws one box per newline.
+        // Slice the whole block: block ranges are line/char aligned, while
+        // `src.end - 1` can land inside a multi-byte character.
+        let ends_with_newline = doc
+            .rope()
+            .slice(source.src.clone())
+            .to_string()
+            .ends_with('\n');
+        if !ends_with_newline {
+            return false;
+        }
+        // A pure blank run already draws one line box per newline.
+        let text: &str = block.source_text.as_deref().unwrap_or(&block.render);
         if text.trim().is_empty() {
             return false;
         }
-        let line_height = block.line_height.as_f32();
-        if line_height <= 0. {
-            return false;
-        }
-        let logical_lines = text.matches('\n').count() + 1;
-        let produced = (block.bounds.size.height.as_f32() / line_height).round() as usize;
-        if produced >= logical_lines {
-            return false;
-        }
-        let extra = px((logical_lines - produced) as f32 * line_height);
+        let extra = px((self.theme.body_size * self.theme.line_ratio).max(1.));
         self.blocks[block_idx].bounds.size.height = px(
             self.blocks[block_idx].bounds.size.height.as_f32() + extra.as_f32(),
         );
-        for block in &mut self.blocks[block_idx + 1..] {
-            block.bounds.origin.y = px(block.bounds.origin.y.as_f32() + extra.as_f32());
-            for span in &mut block.spans {
-                span.origin.y = px(span.origin.y.as_f32() + extra.as_f32());
-            }
-            for decor in &mut block.decors {
-                match decor {
-                    BlockDecor::Quad { bounds, .. } => {
-                        bounds.origin.y = px(bounds.origin.y.as_f32() + extra.as_f32());
-                    }
-                    BlockDecor::Text { origin, .. } => {
-                        *origin = point(origin.x, px(origin.y.as_f32() + extra.as_f32()));
-                    }
-                }
-            }
-            for object in &mut block.objects {
-                object.bounds.origin.y = px(object.bounds.origin.y.as_f32() + extra.as_f32());
-                object.baseline = px(object.baseline.as_f32() + extra.as_f32());
-            }
+        self.blocks[block_idx].extra_caret_line = extra;
+        for later in &mut self.blocks[block_idx + 1..] {
+            later.bounds.origin.y = px(later.bounds.origin.y.as_f32() + extra.as_f32());
         }
         self.size.height = px(self.size.height.as_f32() + extra.as_f32());
         true
@@ -1862,6 +1857,17 @@ impl DocLayout {
             };
             return Some((x, object.bounds.top(), object.bounds.size.height));
         }
+        // The reserved line after the block's final newline (see
+        // `ensure_caret_line`). A display byte one past the painted text is the
+        // sentinel the view uses for the caret that sits there.
+        if block.extra_caret_line.as_f32() > 0.5 && render_byte > block.display_text().len() {
+            let height = block.extra_caret_line;
+            return Some((
+                block.content_left,
+                px(block.bounds.bottom().as_f32() - height.as_f32()),
+                height,
+            ));
+        }
         if block.spans.is_empty() {
             // A block without fragments — a blank line, or a rule — still has a
             // caret: it sits at the content edge of **its own** line box.
@@ -2004,6 +2010,11 @@ impl DocLayout {
                     block.bounds.origin.y.as_f32() + line as f32 * block.line_height.as_f32()
                 ));
             }
+        }
+        if block.extra_caret_line.as_f32() > 0.5 {
+            tops.push(px(
+                block.bounds.bottom().as_f32() - block.extra_caret_line.as_f32(),
+            ));
         }
         tops
     }
@@ -2813,6 +2824,7 @@ fn placeholder_block(
         decors: Vec::new(),
         objects: Vec::new(),
         measured: false,
+        extra_caret_line: px(0.),
     }
 }
 
@@ -2929,6 +2941,7 @@ impl BlockGeometry {
             decors,
             objects,
             measured: true,
+            extra_caret_line: px(0.),
         }
     }
 }
@@ -4227,6 +4240,8 @@ mod tests {
 
     #[test]
     fn the_first_enter_reserves_the_caret_line() {
+        // Exactly the reported case: a rendered paragraph (not a source block)
+        // whose source ends with the newline the Enter just inserted.
         let mut doc = Document::parse("hello");
         doc.apply_edit(5..5, "\n");
         let mut layout = DocLayout::layout_mode_marked(
@@ -4235,26 +4250,49 @@ mod tests {
             Arc::new(ApproxMetrics),
             point(px(0.), px(0.)),
             px(600.),
-            LayoutMode::source(0),
+            LayoutMode::RENDERED,
             None,
         );
         let before = layout.size.height.as_f32();
-        let caret = 6usize;
-        let caret_bounds = layout.caret_bounds(0, caret).expect("caret after the newline");
-        assert!(
-            caret_bounds.origin.y.as_f32() + caret_bounds.size.height.as_f32()
-                > layout.blocks[0].bounds.bottom().as_f32(),
-            "the caret starts outside the block box (the reported bug)"
-        );
-        assert!(layout.ensure_caret_line(Some(caret), Some(0)));
-        assert!(
-            layout.blocks[0].bounds.bottom().as_f32()
-                >= caret_bounds.origin.y.as_f32() + caret_bounds.size.height.as_f32(),
-            "the block must contain the caret line"
-        );
+        assert!(layout.ensure_caret_line(&doc, Some(6)));
         assert!(layout.size.height.as_f32() > before);
-        // Idempotent: a second call has nothing left to add.
-        assert!(!layout.ensure_caret_line(Some(caret), Some(0)));
+        let block = &layout.blocks[0];
+        assert!(
+            block.extra_caret_line.as_f32() > 0.5,
+            "the reserved line was not recorded"
+        );
+        let sentinel = block.display_text().len() + 1;
+        let bounds = layout
+            .caret_bounds(0, sentinel)
+            .expect("the reserved line has a caret box");
+        assert!(bounds.bottom().as_f32() <= block.bounds.bottom().as_f32() + 0.5);
+        assert!(
+            bounds.origin.y.as_f32()
+                >= block.bounds.bottom().as_f32() - block.extra_caret_line.as_f32() - 0.5,
+            "the caret must sit on the reserved line, not the last text line"
+        );
+        assert!(!layout.ensure_caret_line(&doc, Some(6)), "idempotent");
+    }
+
+    #[test]
+    fn the_reserved_line_is_body_sized_even_after_a_heading() {
+        let mut doc = Document::parse("# 123");
+        doc.apply_edit(5..5, "\n");
+        let mut layout = DocLayout::layout_mode_marked(
+            &doc,
+            &EditorTheme::default(),
+            Arc::new(ApproxMetrics),
+            point(px(0.), px(0.)),
+            px(600.),
+            LayoutMode::RENDERED,
+            None,
+        );
+        let heading_height = layout.blocks[0].bounds.size.height.as_f32();
+        let body = EditorTheme::default().body_size * EditorTheme::default().line_ratio;
+        assert!(layout.ensure_caret_line(&doc, Some(6)));
+        let after = layout.blocks[0].bounds.size.height.as_f32();
+        assert!((after - heading_height - body).abs() < 0.5);
+        assert!((layout.blocks[0].extra_caret_line.as_f32() - body).abs() < 0.5);
     }
 
     #[test]
@@ -4268,10 +4306,10 @@ mod tests {
             Arc::new(ApproxMetrics),
             point(px(0.), px(0.)),
             px(600.),
-            LayoutMode::source(1),
+            LayoutMode::RENDERED,
             None,
         );
-        assert!(!layout.ensure_caret_line(Some(7), Some(1)));
+        assert!(!layout.ensure_caret_line(&doc, Some(7)));
         // A caret inside the text has a line already.
         let mut doc = Document::parse("hello");
         doc.apply_edit(5..5, "\n");
@@ -4281,32 +4319,53 @@ mod tests {
             Arc::new(ApproxMetrics),
             point(px(0.), px(0.)),
             px(600.),
-            LayoutMode::source(0),
+            LayoutMode::RENDERED,
             None,
         );
-        assert!(!layout.ensure_caret_line(Some(3), Some(0)));
-        // No source block at all: nothing to do.
-        assert!(!layout.ensure_caret_line(Some(6), None));
-    }
-
-    #[test]
-    fn a_multiline_paragraph_ends_with_one_extra_caret_line() {
-        let mut doc = Document::parse("a\nb");
-        doc.apply_edit(3..3, "\n");
+        assert!(!layout.ensure_caret_line(&doc, Some(3)));
+        // A caret at the end of a block that does not end with a newline stays on
+        // the text line.
+        let doc = Document::parse("hello");
         let mut layout = DocLayout::layout_mode_marked(
             &doc,
             &EditorTheme::default(),
             Arc::new(ApproxMetrics),
             point(px(0.), px(0.)),
             px(600.),
-            LayoutMode::source(0),
+            LayoutMode::RENDERED,
             None,
         );
-        let before = layout.blocks[0].bounds.size.height.as_f32();
-        assert!(layout.ensure_caret_line(Some(4), Some(0)));
-        let after = layout.blocks[0].bounds.size.height.as_f32();
-        assert!((after - before - layout.blocks[0].line_height.as_f32()).abs() < 0.5);
-        assert!(!layout.ensure_caret_line(Some(4), Some(0)));
+        assert!(!layout.ensure_caret_line(&doc, Some(5)));
+        assert!(!layout.ensure_caret_line(&doc, None));
+    }
+
+
+    #[test]
+    fn a_cjk_end_without_a_newline_is_safe() {
+        // The reserved-line probe must not slice inside a multi-byte character.
+        let doc = Document::parse("你好");
+        let mut layout = DocLayout::layout_mode_marked(
+            &doc,
+            &EditorTheme::default(),
+            Arc::new(ApproxMetrics),
+            point(px(0.), px(0.)),
+            px(600.),
+            LayoutMode::RENDERED,
+            None,
+        );
+        assert!(!layout.ensure_caret_line(&doc, Some(6)));
+        let mut doc = Document::parse("你好");
+        doc.apply_edit(6..6, "\n");
+        let mut layout = DocLayout::layout_mode_marked(
+            &doc,
+            &EditorTheme::default(),
+            Arc::new(ApproxMetrics),
+            point(px(0.), px(0.)),
+            px(600.),
+            LayoutMode::RENDERED,
+            None,
+        );
+        assert!(layout.ensure_caret_line(&doc, Some(7)));
     }
 
     #[test]

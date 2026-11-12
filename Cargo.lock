@@ -7279,7 +7279,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "typors-app"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "libloading",
  "typors-core",
@@ -7288,7 +7288,7 @@ dependencies = [
 
 [[package]]
 name = "typors-cache"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -7296,7 +7296,7 @@ dependencies = [
 
 [[package]]
 name = "typors-core"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "pulldown-cmark",
  "ropey",
@@ -7304,7 +7304,7 @@ dependencies = [
 
 [[package]]
 name = "typors-editor"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "gpui-fps",
  "gpui-kit",
@@ -7319,7 +7319,7 @@ dependencies = [
 
 [[package]]
 name = "typors-media"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "base64 0.22.1",
  "ratex-layout",
@@ -7329,14 +7329,14 @@ dependencies = [
 
 [[package]]
 name = "typors-mermaid"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "merman",
 ]
 
 [[package]]
 name = "typors-probes"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "gpui-kit",
  "typors-cache",
@@ -7347,7 +7347,7 @@ dependencies = [
 
 [[package]]
 name = "typors-render"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "gpui-kit",
  "typors-cache",
@@ -7357,7 +7357,7 @@ dependencies = [
 
 [[package]]
 name = "typors-runtime"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "gpui-fps",
  "gpui-kit",
@@ -7374,7 +7374,7 @@ dependencies = [
 
 [[package]]
 name = "typors-settings"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "serde",
  "serde_json",

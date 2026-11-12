@@ -1858,8 +1858,9 @@ pub fn newlines_probe(
             view.update(cx, |view, _cx| {
                 view.sync_layout();
                 let layout = view.layout()?;
-                let caret = view.caret()?;
-                let (block_idx, byte) = layout.display_byte_for_src(view.doc(), caret)?;
+                // The *painted* caret, including the reserved line after the
+                // document's final newline (not the clamped display byte).
+                let (block_idx, byte) = view.caret_display_position(layout)?;
                 let caret_box = layout.caret_bounds(block_idx, byte)?;
                 let block_bottom = layout.blocks.get(block_idx)?.bounds.bottom().as_f32();
                 Some((

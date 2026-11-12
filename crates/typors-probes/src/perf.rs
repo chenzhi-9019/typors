@@ -605,9 +605,11 @@ pub fn perf_probe(view: &mut MarkdownView, window: &mut Window) -> PerfCapture {
     view.set_caret(view.doc().len_bytes());
     let _ = view.perf_frame(metrics.clone(), width, viewport_height, max_scroll, true);
     let uncropped = view.layout_now(metrics.clone(), point(px(0.), px(0.)), width);
+    // Use the view's own caret mapping: it includes the reserved line after the
+    // document's final newline, which a raw display byte would miss.
     let caret_uncropped = view
         .caret()
-        .and_then(|src| uncropped.display_byte_for_src(view.doc(), src))
+        .and_then(|src| view.caret_display_byte(&uncropped, src))
         .and_then(|(b, byte)| uncropped.caret_bounds(b, byte));
     let p7_ok = match (caret_bounds_culled, caret_uncropped) {
         (Some(a), Some(b)) => {

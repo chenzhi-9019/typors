@@ -1102,7 +1102,7 @@ impl MarkdownView {
             (Some(marked), _) => {
                 layout.display_byte_for_composite(&self.doc, marked.composite_caret())
             }
-            (None, Some(src)) => layout.display_byte_for_src(&self.doc, src),
+            (None, Some(src)) => self.caret_display_byte(layout, src),
             (None, None) => None,
         }
     }
@@ -1330,8 +1330,7 @@ impl MarkdownView {
             Some(&mut self.block_cache),
             window,
         );
-        let source_block = layout.mode.source_block;
-        layout.ensure_caret_line(self.caret, source_block);
+        layout.ensure_caret_line(&self.doc, self.caret);
         layout
     }
 
@@ -1460,13 +1459,32 @@ impl MarkdownView {
     pub fn display_byte(&self) -> Option<(usize, usize)> {
         let caret = self.caret?;
         let layout = self.layout.as_ref()?;
-        layout.display_byte_for_src(&self.doc, caret)
+        self.caret_display_byte(layout, caret)
+    }
+
+    /// The caret's display position, including the reserved line the caret owns
+    /// after the document's final newline: that line has no painted text, so the
+    /// byte is one past the block's display text (the sentinel `caret_x` and
+    /// `line_tops` recognise).
+    pub fn caret_display_byte(&self, layout: &DocLayout, src: usize) -> Option<(usize, usize)> {
+        let (block_idx, byte) = layout.display_byte_for_src(&self.doc, src)?;
+        let block = layout.blocks.get(block_idx)?;
+        if block.extra_caret_line.as_f32() > 0.5
+            && self
+                .doc
+                .blocks()
+                .get(block_idx)
+                .is_some_and(|source| source.src.end == src)
+        {
+            return Some((block_idx, block.display_text().len() + 1));
+        }
+        Some((block_idx, byte))
     }
 
     pub fn caret_state(&self) -> Option<CaretState> {
         let src = self.caret?;
         let layout = self.layout.as_ref()?;
-        let (block_idx, display_byte) = layout.display_byte_for_src(&self.doc, src)?;
+        let (block_idx, display_byte) = self.caret_display_byte(layout, src)?;
         Some(CaretState {
             src,
             block_idx,
@@ -1484,7 +1502,11 @@ impl MarkdownView {
     /// current layout has (group 6's `bounds_for_range` primitive).
     pub fn bounds_for_src(&self, src: usize) -> Option<Bounds<Pixels>> {
         let layout = self.layout.as_ref()?;
-        let (block_idx, display_byte) = layout.display_byte_for_src(&self.doc, src)?;
+        let (block_idx, display_byte) = if Some(src) == self.caret {
+            self.caret_display_byte(layout, src)?
+        } else {
+            layout.display_byte_for_src(&self.doc, src)?
+        };
         layout.caret_bounds(block_idx, display_byte)
     }
 
@@ -1528,8 +1550,7 @@ impl MarkdownView {
             generation,
             None,
         );
-        let source_block = layout.mode.source_block;
-        layout.ensure_caret_line(self.caret, source_block);
+        layout.ensure_caret_line(&self.doc, self.caret);
         layout
     }
 
@@ -2087,6 +2108,7 @@ impl MarkdownView {
         action: HistoryAction,
         trigger: EditTrigger,
     ) {
+        let edit_started = std::time::Instant::now();
         // Any buffer change ends a composition: the anchor it recorded no longer
         // describes where the user is typing. Windows never tells us a composition
         // ended (`WM_IME_ENDCOMPOSITION` is unhandled), so the commit and cancel
@@ -2129,7 +2151,7 @@ impl MarkdownView {
         self.last_trigger = Some(trigger);
         if edit_log_enabled() {
             eprintln!(
-                "edit trigger={} src={}..{} insert=\"{}\" buf={}B->{}B reparsed={} blocks caret={:?}->{:?} sel={:?} rev={}",
+                "edit trigger={} src={}..{} insert=\"{}\" buf={}B->{}B reparsed={} blocks took={:.2}ms caret={:?}->{:?} sel={:?} rev={}",
                 trigger.as_str(),
                 start,
                 end,
@@ -2137,6 +2159,7 @@ impl MarkdownView {
                 length_before,
                 self.doc.len_bytes(),
                 self.doc.last_edit_blocks(),
+                edit_started.elapsed().as_secs_f64() * 1000.0,
                 caret_before,
                 self.caret,
                 selection_at_entry,
@@ -3240,6 +3263,7 @@ impl Element for DocElement {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
+        let frame_started = std::time::Instant::now();
         let width = px(window.viewport_size().width.as_f32().min(
             self.view
                 .read(cx)
@@ -3347,6 +3371,13 @@ impl Element for DocElement {
         let mut style = Style::default();
         style.size.width = relative(1.0).into();
         style.size.height = layout.size.height.into();
+        if std::env::var("TYPORS_FRAME_LOG").is_ok() {
+            eprintln!(
+                "frame request_layout took {:.2} ms (page {:.1})",
+                frame_started.elapsed().as_secs_f64() * 1000.0,
+                layout.size.height.as_f32()
+            );
+        }
         (window.request_layout(style, [], cx), layout)
     }
 
@@ -3360,6 +3391,7 @@ impl Element for DocElement {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let started = std::time::Instant::now();
+        let prepaint_started = started;
         let metrics = match self.view.read(cx).frame_metrics.clone() {
             Some(metrics) => metrics,
             None => {
@@ -3457,6 +3489,12 @@ impl Element for DocElement {
             }
         };
 
+        if std::env::var("TYPORS_FRAME_LOG").is_ok() {
+            eprintln!(
+                "frame prepaint took {:.2} ms shaped {shaped} culled {culled}",
+                prepaint_started.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         PrepaintState {
             highlight,
             quads,
