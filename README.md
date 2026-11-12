@@ -137,7 +137,7 @@ typors.exe --unregister
 ```powershell
 cargo build --release --workspace
 pwsh packaging\build-nsis.ps1
-# -> packaging\dist\typors-1.0.4-setup.exe
+# -> packaging\dist\typors-1.0.5-setup.exe
 ```
 
 The installer's first choice is **install scope**: every user (Program Files +
@@ -150,8 +150,8 @@ chooses. The core files are the only required section, and the Finish page's
 Silent installs must state the scope:
 
 ```powershell
-typors-1.0.4-setup.exe /S /SCOPE=me /D=C:\path\to\typors
-typors-1.0.4-setup.exe /S /SCOPE=all   # triggers UAC
+typors-1.0.5-setup.exe /S /SCOPE=me /D=C:\path\to\typors
+typors-1.0.5-setup.exe /S /SCOPE=all   # triggers UAC
 ```
 
 The old Inno Setup script (`packaging\typors.iss`) is kept only as history; NSIS
@@ -171,6 +171,14 @@ Edits are local: only the blank-line-separated unit that owns the edit (plus one
 block of lookahead) is reparsed, with the whole-document parse as the fallback
 and the oracle for tests. `TYPORS_EDIT_LOG=1` reports the blocks actually
 reparsed.
+
+## Scrolling
+
+A scrollbar sits on the window's right edge and appears only when the page is
+taller than the editor area; drag it (or click the track) to scroll. The caret is
+always kept inside the visible editor band — the window minus the 28 px menu row
+and status bar — so pressing Enter at the bottom scrolls just enough to show the
+new line. The page itself stays centered at its configured width.
 
 ## Cache and reading positions
 

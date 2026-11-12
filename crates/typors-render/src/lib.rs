@@ -10,5 +10,7 @@ pub mod render;
 pub use render::{
     ApproxMetrics, BlockBox, BlockCache, BlockDecor, BlockMode, DocLayout, DrawSpan, EditorTheme,
     LayoutMode, MediaMeasures, Metrics, NoMedia, ObjectBox, ObjectHit, ObjectMetrics, RenderHit,
-    SOURCE_SPAN, ShapeCache, Viewport, WindowMetrics, geometry_fingerprint,
+    SCROLLBAR_GAP, SCROLLBAR_MIN_THUMB, SCROLLBAR_WIDTH, SOURCE_SPAN, ScrollbarGeometry,
+    ShapeCache, Viewport, WindowMetrics, geometry_fingerprint, scroll_for_scrollbar_thumb_top,
+    scrollbar_geometry,
 };

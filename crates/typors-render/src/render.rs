@@ -445,6 +445,9 @@ pub struct EditorTheme {
     /// Selection highlight. Painted *under* the text, so a selection never hides
     /// the glyphs it covers.
     pub selection: Rgba,
+    /// Overlay scrollbar track and thumb. Only painted when the page overflows.
+    pub scrollbar_track: Rgba,
+    pub scrollbar_thumb: Rgba,
 }
 
 impl EditorTheme {
@@ -505,8 +508,93 @@ impl Default for EditorTheme {
             quote_bar: rgb(0xDFE2E5),
             caret: rgb(0x333333),
             selection: rgb(0xB5D6FC),
+            scrollbar_track: rgba(0x00000008),
+            scrollbar_thumb: rgba(0x888888B0),
         }
     }
+}
+
+/// The scrollbar's two boxes, in whatever coordinate space the caller uses.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScrollbarGeometry {
+    pub track: Bounds<Pixels>,
+    pub thumb: Bounds<Pixels>,
+}
+
+/// Width of the overlay scrollbar.
+pub const SCROLLBAR_WIDTH: f32 = 8.0;
+/// Gap between the scrollbar and the page/viewport edge.
+pub const SCROLLBAR_GAP: f32 = 6.0;
+/// A thumb never gets shorter than this, so a long document stays grabbable.
+pub const SCROLLBAR_MIN_THUMB: f32 = 28.0;
+
+/// Geometry of the right-edge overlay scrollbar.
+///
+/// `page_right` and `page_height` describe the document box; `visible_top` and
+/// `visible_height` the band the scroll container shows; `scroll` the vertical
+/// offset. `None` when the document fits: the bar is only shown when needed.
+pub fn scrollbar_geometry(
+    page_right: f32,
+    page_height: f32,
+    visible_top: f32,
+    visible_height: f32,
+    scroll: f32,
+) -> Option<ScrollbarGeometry> {
+    if !(page_right.is_finite()
+        && page_height.is_finite()
+        && visible_top.is_finite()
+        && visible_height.is_finite()
+        && scroll.is_finite())
+    {
+        return None;
+    }
+    if visible_height <= 0.0 || page_height <= visible_height + 0.5 {
+        return None;
+    }
+    let track_top = visible_top + SCROLLBAR_GAP;
+    let track_height = (visible_height - SCROLLBAR_GAP * 2.0).max(1.0);
+    let x = page_right - SCROLLBAR_WIDTH - SCROLLBAR_GAP;
+    let ratio = (visible_height / page_height).clamp(0.0, 1.0);
+    let thumb_height = (track_height * ratio).clamp(SCROLLBAR_MIN_THUMB.min(track_height), track_height);
+    let max_scroll = page_height - visible_height;
+    let progress = (scroll / max_scroll).clamp(0.0, 1.0);
+    let thumb_top = track_top + (track_height - thumb_height) * progress;
+    Some(ScrollbarGeometry {
+        track: Bounds::new(
+            point(px(x), px(track_top)),
+            size(px(SCROLLBAR_WIDTH), px(track_height)),
+        ),
+        thumb: Bounds::new(
+            point(px(x), px(thumb_top)),
+            size(px(SCROLLBAR_WIDTH), px(thumb_height)),
+        ),
+    })
+}
+
+/// Inverse of the thumb position: the scroll offset that puts the thumb's top
+/// at `thumb_top` (dragging the bar).
+pub fn scroll_for_scrollbar_thumb_top(
+    page_height: f32,
+    visible_top: f32,
+    visible_height: f32,
+    thumb_top: f32,
+) -> Option<f32> {
+    if !(page_height.is_finite() && visible_top.is_finite() && visible_height.is_finite()) {
+        return None;
+    }
+    if visible_height <= 0.0 || page_height <= visible_height + 0.5 {
+        return None;
+    }
+    let track_top = visible_top + SCROLLBAR_GAP;
+    let track_height = (visible_height - SCROLLBAR_GAP * 2.0).max(1.0);
+    let ratio = (visible_height / page_height).clamp(0.0, 1.0);
+    let thumb_height = (track_height * ratio).clamp(SCROLLBAR_MIN_THUMB.min(track_height), track_height);
+    let travel = (track_height - thumb_height).max(0.0);
+    if travel <= 0.0 {
+        return Some(0.0);
+    }
+    let progress = ((thumb_top - track_top) / travel).clamp(0.0, 1.0);
+    Some(progress * (page_height - visible_height))
 }
 
 // ---------------------------------------------------------------- geometry
@@ -1693,6 +1781,16 @@ impl DocLayout {
                         );
                     }
                 }
+            }
+            // Objects (images, formulas, diagrams) live in their own boxes; hit
+            // testing and the caret read them from the translated layout, so they
+            // must move with it like spans and decorations do.
+            for object in &mut block.objects {
+                object.bounds.origin.x =
+                    px(object.bounds.origin.x.as_f32() + by.x.as_f32());
+                object.bounds.origin.y =
+                    px(object.bounds.origin.y.as_f32() + by.y.as_f32());
+                object.baseline = px(object.baseline.as_f32() + by.y.as_f32());
             }
         }
     }
@@ -4366,6 +4464,48 @@ mod tests {
             None,
         );
         assert!(layout.ensure_caret_line(&doc, Some(7)));
+    }
+
+
+    #[test]
+    fn the_scrollbar_appears_only_when_the_page_overflows() {
+        assert!(super::scrollbar_geometry(860., 600., 28., 600., 0.).is_none());
+        assert!(super::scrollbar_geometry(860., 601., 28., 600., 0.).is_some());
+        assert!(super::scrollbar_geometry(860., 0., 28., 0., 0.).is_none());
+    }
+
+    #[test]
+    fn the_scrollbar_thumb_tracks_the_offset() {
+        let track_top = 28. + super::SCROLLBAR_GAP;
+        let track_height = 600. - super::SCROLLBAR_GAP * 2.;
+        let top = super::scrollbar_geometry(860., 2400., 28., 600., 0.).expect("overflowing page");
+        assert!((top.thumb.origin.y.as_f32() - track_top).abs() < 0.01);
+        assert!((top.track.size.width.as_f32() - super::SCROLLBAR_WIDTH).abs() < 0.01);
+        assert!((top.track.right().as_f32() - (860. - super::SCROLLBAR_GAP)).abs() < 0.01);
+
+        let bottom = super::scrollbar_geometry(860., 2400., 28., 600., 1800.).expect("bottom");
+        let expected_bottom = 28. + 600. - super::SCROLLBAR_GAP;
+        assert!((bottom.thumb.bottom().as_f32() - expected_bottom).abs() < 0.01);
+
+        let middle = super::scrollbar_geometry(860., 2400., 28., 600., 900.).expect("middle");
+        let travel = track_height - middle.thumb.size.height.as_f32();
+        assert!((middle.thumb.origin.y.as_f32() - (track_top + travel * 0.5)).abs() < 0.01);
+    }
+
+    #[test]
+    fn dragging_maps_back_to_the_same_offset() {
+        let geometry = super::scrollbar_geometry(860., 2400., 28., 600., 700.).expect("page");
+        let scroll = super::scroll_for_scrollbar_thumb_top(
+            2400.,
+            28.,
+            600.,
+            geometry.thumb.origin.y.as_f32(),
+        )
+        .expect("inverse");
+        assert!((scroll - 700.).abs() < 0.01);
+        let clamped = super::scroll_for_scrollbar_thumb_top(2400., 28., 600., f32::NEG_INFINITY)
+            .expect("clamped");
+        assert_eq!(clamped, 0.);
     }
 
     #[test]

@@ -1031,6 +1031,16 @@ impl EditorShell {
 
 impl Render for EditorShell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Tell the editor the band it actually occupies: the menu row and the
+        // status bar take 28 px each, and caret scrolling must respect them.
+        let window_height = window.viewport_size().height.as_f32();
+        let editor_viewport = typors_editor::view::EditorViewport {
+            top: 28.0,
+            height: (window_height - 28.0 - 28.0).max(1.0),
+        };
+        let _ = self
+            .editor
+            .update(cx, |view, _| view.set_editor_viewport(Some(editor_viewport)));
         if let Some(interval) = self.settings.files.interval()
             && self.last_autosave.elapsed() >= interval
         {

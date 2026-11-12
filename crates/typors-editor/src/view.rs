@@ -552,6 +552,11 @@ pub struct MarkdownView {
     scroll_applied: bool,
     /// `TYPORS_CULL_LOG`: print the culling band per frame.
     cull_log: bool,
+    /// The visible editor band, set by the shell. `None` means "the whole
+    /// window", which is what the headless probes use.
+    editor_viewport: Option<EditorViewport>,
+    /// Grab offset (pixels from the thumb top) while dragging the scrollbar.
+    scrollbar_drag: Option<f32>,
     /// Process-wide switches for the streaming pipeline and the persistent
     /// cache (`TYPORS_STREAMING`, `TYPORS_CACHE`).
     features: typors_cache::features::Features,
@@ -610,6 +615,8 @@ impl MarkdownView {
             frame_metrics: None,
             scroll_applied: false,
             cull_log: env_flag("TYPORS_CULL_LOG"),
+            editor_viewport: None,
+            scrollbar_drag: None,
             features: typors_cache::features::Features::global(),
             parse_rx: None,
             streaming_override: None,
@@ -955,6 +962,56 @@ impl MarkdownView {
         &self.theme
     }
 
+    /// Tell the editor which window band its scroll container occupies (the
+    /// shell calls this each render; probes leave it unset for the full window).
+    pub fn set_editor_viewport(&mut self, viewport: Option<EditorViewport>) {
+        self.editor_viewport = viewport;
+    }
+
+    /// The visible editor band, falling back to the whole window.
+    pub fn viewport_rect(&self, window_height: f32) -> EditorViewport {
+        self.editor_viewport.unwrap_or(EditorViewport {
+            top: 0.0,
+            height: window_height.max(1.0),
+        })
+    }
+
+    /// Scrollbar geometry in window coordinates, or None when the page fits.
+    fn scrollbar_bounds(
+        &self,
+        window_height: f32,
+        window_width: f32,
+    ) -> Option<typors_render::ScrollbarGeometry> {
+        let layout = self.layout.as_ref()?;
+        let viewport = self.viewport_rect(window_height);
+        if viewport.height <= 0.0 {
+            return None;
+        }
+        typors_render::scrollbar_geometry(
+            window_width,
+            layout.size.height.as_f32(),
+            viewport.top,
+            viewport.height,
+            self.scroll_offset_y(),
+        )
+    }
+
+    /// Move the scroll thumb so its top lands at `thumb_top` (window coordinates).
+    fn scroll_to_scrollbar_thumb(&mut self, thumb_top: f32, window_height: f32) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let viewport = self.viewport_rect(window_height);
+        if let Some(scroll) = typors_render::scroll_for_scrollbar_thumb_top(
+            layout.size.height.as_f32(),
+            viewport.top,
+            viewport.height,
+            thumb_top,
+        ) {
+            self.set_scroll_offset_y(scroll);
+        }
+    }
+
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
     }
@@ -1026,6 +1083,16 @@ impl MarkdownView {
 }
 
 // ------------------------------------------------------- caret scroll-into-view
+
+/// The rectangle the editor's scroll container actually shows, in window
+/// coordinates. The window is taller than the editor: the menu bar and status bar
+/// take a fixed 28 px each, and caret scrolling must respect the real band or it
+/// leaves the caret inside the bars.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EditorViewport {
+    pub top: f32,
+    pub height: f32,
+}
 
 /// What one caret scroll-into-view correction did, in pixels from the top of the
 /// document.
@@ -2386,6 +2453,36 @@ impl MarkdownView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
+        // The overlay scrollbar owns presses inside its band: it must not move the
+        // caret, and dragging it must not start a text selection.
+        let window_height = window.viewport_size().height.as_f32();
+        let window_width = window.viewport_size().width.as_f32();
+        if let Some(bar) = self.scrollbar_bounds(window_height, window_width) {
+            let slack = 4.0;
+            let x = bar.track.origin.x.as_f32();
+            let y = bar.track.origin.y.as_f32();
+            let width = bar.track.size.width.as_f32();
+            let height = bar.track.size.height.as_f32();
+            if event.position.x.as_f32() >= x - slack
+                && event.position.x.as_f32() <= x + width + slack
+                && event.position.y.as_f32() >= y
+                && event.position.y.as_f32() <= y + height
+            {
+                let thumb_top = bar.thumb.origin.y.as_f32();
+                let thumb_height = bar.thumb.size.height.as_f32();
+                let grab = if event.position.y.as_f32() >= thumb_top
+                    && event.position.y.as_f32() <= thumb_top + thumb_height
+                {
+                    event.position.y.as_f32() - thumb_top
+                } else {
+                    thumb_height * 0.5
+                };
+                self.scrollbar_drag = Some(grab);
+                self.scroll_to_scrollbar_thumb(event.position.y.as_f32() - grab, window_height);
+                cx.notify();
+                return;
+            }
+        }
         // `event.position` is a window coordinate, and the published layout is
         // already in window coordinates (`paint` translated it), so the point is
         // fed in as-is — adding `element.bounds.origin` again would double it.
@@ -2413,9 +2510,15 @@ impl MarkdownView {
     fn on_mouse_move(
         &mut self,
         event: &MouseMoveEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let Some(grab) = self.scrollbar_drag {
+            let window_height = window.viewport_size().height.as_f32();
+            self.scroll_to_scrollbar_thumb(event.position.y.as_f32() - grab, window_height);
+            cx.notify();
+            return;
+        }
         if !self.dragging || event.pressed_button != Some(MouseButton::Left) {
             return;
         }
@@ -2431,6 +2534,7 @@ impl MarkdownView {
 
     fn on_mouse_up(&mut self, _: &MouseUpEvent, _window: &mut Window, _cx: &mut Context<Self>) {
         self.dragging = false;
+        self.scrollbar_drag = None;
     }
 }
 
@@ -2887,8 +2991,6 @@ impl Render for MarkdownView {
         let page = div()
             .id("typors-page")
             .size_full()
-            .max_w(px(page_width))
-            .mx_auto()
             .overflow_y_scroll()
             .track_scroll(&self.scroll_handle)
             .bg(self.theme.page_bg)
@@ -2921,7 +3023,15 @@ impl Render for MarkdownView {
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_move(cx.listener(Self::on_mouse_move))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .child(DocElement { view: cx.entity() });
+            // The scroll container is the whole editor area, so the overlay
+            // scrollbar can sit on the window's right edge; the page itself stays
+            // centered at its max width.
+            .child(
+                div()
+                    .max_w(px(page_width))
+                    .mx_auto()
+                    .child(DocElement { view: cx.entity() }),
+            );
 
         if self.show_fps {
             // The real `gpui-fps` HUD (task 7.1). `--dump-perf` cannot host it
@@ -3269,7 +3379,11 @@ impl Element for DocElement {
                 .read(cx)
                 .page_width_for(window.viewport_size().width.as_f32()),
         ));
-        let viewport_height = window.viewport_size().height.as_f32();
+        let viewport_height = self
+            .view
+            .read(cx)
+            .viewport_rect(window.viewport_size().height.as_f32())
+            .height;
         let view = self.view.clone();
         let (mono_family, cache) = {
             let view = self.view.read(cx);
@@ -3403,12 +3517,20 @@ impl Element for DocElement {
         // coordinates and the scroll container has already moved the element, so
         // the visible band in element-local coordinates starts at
         // `-bounds.origin.y`.
-        let viewport_height = window.viewport_size().height.as_f32();
-        let viewport = match (bounds.origin.y.as_f32(), viewport_height) {
-            (top, height) if top.is_finite() && height > 0. => {
-                Viewport::on_screen(top, height, height * CULL_MARGIN)
-            }
-            _ => Viewport::UNBOUNDED,
+        // The scroll container is smaller than the window (menu and status bars);
+        // the shell publishes its band so culling and caret scrolling agree with
+        // what is actually visible.
+        let viewport_rect = self
+            .view
+            .read(cx)
+            .viewport_rect(window.viewport_size().height.as_f32());
+        let viewport_height = viewport_rect.height;
+        let band_top = viewport_rect.top - bounds.origin.y.as_f32();
+        let viewport = if band_top.is_finite() && viewport_height > 0. {
+            let margin = viewport_height * CULL_MARGIN;
+            Viewport::new(band_top - margin, band_top + viewport_height + margin)
+        } else {
+            Viewport::UNBOUNDED
         };
         // The paint band is the authority: whatever this frame can show must be
         // measured before it is shaped. Normally the layout pass already did it;
@@ -3427,7 +3549,35 @@ impl Element for DocElement {
         if late > 0 && self.view.read(cx).cull_log {
             eprintln!("cull: measured {late} late blocks for the paint band");
         }
-        let (mut texts, quads, shaped, culled) = shape_frame(&metrics, request_layout, viewport);
+        let (mut texts, mut quads, shaped, culled) =
+            shape_frame(&metrics, request_layout, viewport);
+        // Overlay scrollbar on the page's right edge, only when it overflows.
+        let scrollbar = {
+            let view = self.view.read(cx);
+            let rect = view.viewport_rect(window.viewport_size().height.as_f32());
+            let scroll = rect.top - bounds.origin.y.as_f32();
+            // The element is the centered page; the bar lives on the window's
+            // right edge, so convert that edge into element-local coordinates.
+            let window_right =
+                window.viewport_size().width.as_f32() - bounds.origin.x.as_f32();
+            typors_render::scrollbar_geometry(
+                window_right,
+                request_layout.size.height.as_f32(),
+                scroll,
+                rect.height,
+                scroll,
+            )
+        };
+        if let Some(bar) = scrollbar {
+            quads.push(QuadCmd {
+                bounds: bar.track,
+                color: request_layout.theme.scrollbar_track,
+            });
+            quads.push(QuadCmd {
+                bounds: bar.thumb,
+                color: request_layout.theme.scrollbar_thumb,
+            });
+        }
         let (objects, object_texts) = self.view.update(cx, |view, cx| {
             collect_objects(view, request_layout, viewport, metrics.as_ref(), window, cx)
         });

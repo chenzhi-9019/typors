@@ -1328,6 +1328,43 @@ fn dump_newlines(source: Option<PathBuf>, doc: Document, target: Option<(usize, 
                         })
                         .ok();
                     capture.checks.push(newline_user_scroll_check(held));
+
+                    // N8: the editor's visible band is the window minus the menu and
+                    // status bars. With that band published, a caret parked at the end
+                    // must still be scrolled wholly inside it by the next frames.
+                    let mut window = window.clone();
+                    let band = window
+                        .update(|window, cx| {
+                            let height = window.viewport_size().height.as_f32();
+                            let band = (height - 56.0).max(160.0);
+                            view.update(cx, |view, cx| {
+                                view.set_editor_viewport(Some(
+                                    typors_editor::view::EditorViewport {
+                                        top: 28.0,
+                                        height: band,
+                                    },
+                                ));
+                                view.set_scroll_offset_y(0.0);
+                                view.set_caret(view.doc().len_bytes());
+                                cx.notify();
+                            });
+                            band
+                        })
+                        .ok();
+                    cx.background_executor()
+                        .timer(Duration::from_millis(SCROLL_SETTLE_MS))
+                        .await;
+                    let observed = window
+                        .update(|_window, cx| {
+                            view.update(cx, |view, cx| {
+                                let result = (view.scroll_offset_y(), view.caret_bounds());
+                                view.set_editor_viewport(None);
+                                cx.notify();
+                                result
+                            })
+                        })
+                        .ok();
+                    capture.checks.push(newline_viewport_check(observed, band));
                 }
                 if let Ok(mut guard) = capture.lock() {
                     *guard = result;
@@ -1403,6 +1440,37 @@ fn newline_frame_check(
             "page {page:.1}px in a {viewport_height:.1}px viewport, caret parked at the top of the \
              document; after {SCROLL_SETTLE_MS} ms of frames the offset is {scroll:.1} and the \
              caret's window rectangle is {top:.1}..{bottom:.1}"
+        ),
+    )
+}
+
+
+/// N8: does the frame keep the caret inside the real editor band (the window
+/// minus the 28 px menu and status bars), scrolling just enough to show it?
+fn newline_viewport_check(
+    observed: Option<(f32, Option<Bounds<Pixels>>)>,
+    band: Option<f32>,
+) -> (String, bool, String) {
+    const NAME: &str = "N8 the caret stays inside the editor band (window minus the bars)";
+    let (Some(band), Some((scroll, caret))) = (band, observed) else {
+        return (
+            NAME.to_string(),
+            false,
+            "the window could not be reached".to_string(),
+        );
+    };
+    let Some(caret) = caret else {
+        return (NAME.to_string(), false, "there is no caret".to_string());
+    };
+    let top = caret.origin.y.as_f32();
+    let bottom = top + caret.size.height.as_f32();
+    let inside = top >= 28.0 - 0.5 && bottom <= 28.0 + band + 0.5;
+    (
+        NAME.to_string(),
+        inside && scroll > 1.0,
+        format!(
+            "band 28.0..{:.1}, scroll {scroll:.1}, caret {top:.1}..{bottom:.1}",
+            28.0 + band
         ),
     )
 }
