@@ -1589,8 +1589,46 @@ fn finalize(text: &str, builders: Vec<Builder>) -> Vec<Block> {
             table: None,
         });
     }
+    demote_unfinished_fences(text, &mut blocks);
     expand_toc(text, &mut blocks);
     blocks
+}
+
+/// A fence opener without a newline after it is still being typed.
+///
+/// The moment the language characters arrive the parser sees an unclosed fenced
+/// block, and the live preview would replace the line with an empty code plate
+/// before the user pressed Enter. Until the opening line is terminated, the line
+/// is plain text.
+fn demote_unfinished_fences(text: &str, blocks: &mut [Block]) {
+    for block in blocks.iter_mut() {
+        let raw = text.get(block.src.clone()).unwrap_or_default();
+        if raw.contains('\n') {
+            continue;
+        }
+        let carries_block_object = block.spans.iter().any(|span| {
+            matches!(
+                &span.kind,
+                SpanKind::Object(ObjectKind::Chart { .. } | ObjectKind::Diagram { .. })
+            )
+        });
+        if !matches!(block.kind, BlockKind::FencedCode { .. }) && !carries_block_object {
+            continue;
+        }
+        block.kind = BlockKind::Paragraph;
+        block.table = None;
+        block.render = raw.to_string();
+        block.spans = if raw.is_empty() {
+            Vec::new()
+        } else {
+            vec![Span {
+                src: block.src.clone(),
+                render: 0..raw.len(),
+                kind: SpanKind::Text,
+                style: Style::PLAIN,
+            }]
+        };
+    }
 }
 
 /// `[toc]` is expanded into a static outline of every heading. The block still
@@ -2440,6 +2478,35 @@ mod tests {
         for (index, (local, expected)) in doc.blocks().iter().zip(full.blocks()).enumerate() {
             assert_eq!(local, expected, "{context}: block {index} differs");
         }
+    }
+
+
+    #[test]
+    fn a_fence_renders_only_after_enter() {
+        // Three backticks and a space are still being typed: plain text, no plate.
+        for text in ["```", "``` ", "```rust", "```chart"] {
+            let doc = Document::parse(text);
+            assert_eq!(
+                doc.blocks()[0].kind,
+                BlockKind::Paragraph,
+                "{text:?} must stay plain text before Enter"
+            );
+            assert_eq!(doc.blocks()[0].render, text);
+        }
+        // Enter terminates the opening line: now it is a fence.
+        let doc = Document::parse("```\n");
+        assert!(
+            matches!(doc.blocks()[0].kind, BlockKind::FencedCode { .. }),
+            "after Enter: {:?}",
+            doc.blocks()[0].kind
+        );
+        // A chart fence becomes the object only after its opening line is closed.
+        let doc = Document::parse("```chart\n");
+        assert!(matches!(doc.blocks()[0].kind, BlockKind::Paragraph));
+        assert!(doc.blocks()[0]
+            .spans
+            .iter()
+            .any(|span| matches!(span.kind, SpanKind::Object(ObjectKind::Chart { .. }))));
     }
 
     #[test]

@@ -2209,41 +2209,73 @@ pub fn blink_probe(view: &mut MarkdownView) -> ProbeCapture {
     ProbeCapture { report, checks }
 }
 
-/// `--dump-completion`: the Markdown snippet catalog and its boundaries.
+/// `--dump-completion`: the fence-language list and the snippet boundaries.
 pub fn completion_probe(_view: &MarkdownView) -> ProbeCapture {
     use typors_core::Document;
     let mut checks: Vec<(String, bool, String)> = Vec::new();
     let mut report = String::from("# completion probe\n");
+
     let heading = Document::parse("##");
-    let state = typors_editor::suggest_completion(&heading, 2);
-    let ok_heading = state
-        .as_ref()
-        .is_some_and(|state| state.items.first().is_some_and(|item| item.insert == "## "));
+    let no_heading = typors_editor::suggest_completion(&heading, 2).is_none();
     checks.push((
-        "CO1 '##' suggests a level-2 heading".to_string(),
-        ok_heading,
-        format!("{state:?}"),
+        "CO1 '#' headings do not open the popup".to_string(),
+        no_heading,
+        "headings are typed, not picked".to_string(),
     ));
+
+    let inline = Document::parse("text `");
+    let no_inline = typors_editor::suggest_completion(&inline, inline.len_bytes()).is_none();
+    checks.push((
+        "CO2 a backtick does not suggest an inline-code close".to_string(),
+        no_inline,
+        "no inline-code snippet".to_string(),
+    ));
+
     let fence = Document::parse("```");
-    let fence_state = typors_editor::suggest_completion(&fence, 3);
-    let ok_fence = fence_state.as_ref().is_some_and(|state| {
+    let languages = typors_editor::suggest_completion(&fence, 3);
+    let ok_languages = languages.as_ref().is_some_and(|state| {
         state
             .items
             .first()
-            .is_some_and(|item| item.insert == "```\n\n```")
+            .is_some_and(|item| item.label == "(无语言)")
+            && state.items.iter().any(|item| item.label == "rust")
     });
     checks.push((
-        "CO2 '```' suggests a fenced code block".to_string(),
-        ok_fence,
-        format!("{fence_state:?}"),
+        "CO3 a fence offers the language list (plain block first)".to_string(),
+        ok_languages,
+        format!("{} items", languages.map_or(0, |state| state.items.len())),
     ));
+
+    let python = Document::parse("```py");
+    let python_state = typors_editor::suggest_completion(&python, 5);
+    let ok_python = python_state.as_ref().is_some_and(|state| {
+        state.items.len() == 1
+            && state.items[0].label == "python"
+            && state.items[0].insert == "python\n"
+    });
+    checks.push((
+        "CO4 a language prefix filters the list".to_string(),
+        ok_python,
+        format!("{python_state:?}"),
+    ));
+
+    let exact = Document::parse("```python");
+    let ok_exact = typors_editor::suggest_completion(&exact, 9).is_none();
+    checks.push((
+        "CO5 an exact language hides the popup".to_string(),
+        ok_exact,
+        "Enter breaks the line".to_string(),
+    ));
+
     let prose = Document::parse("ordinary prose");
     let none = typors_editor::suggest_completion(&prose, prose.len_bytes()).is_none();
     checks.push((
-        "CO3 ordinary prose has no suggestion".to_string(),
+        "CO6 ordinary prose has no suggestion".to_string(),
         none,
         "no popup".to_string(),
     ));
-    report.push_str("completion catalog: heading/fence/no-match\n");
+
+    report.push_str("completion: fence languages; no heading or inline-code popups\n");
     ProbeCapture { report, checks }
 }
+

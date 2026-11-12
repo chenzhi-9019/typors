@@ -231,8 +231,15 @@ It has been removed: `typors` now has one executable and the probes in
 ## Live preview
 
 Typing `# ` / `## ` / `- ` / `1. ` / `> ` hides the marker immediately and keeps
-the line rendered while the caret stays in it. Fenced code blocks render their
-plate and content while editing. `chart` / `mermaid` fences stay as source while
-the caret is inside and render only after the caret leaves. The caret mapping
-and A5/C6/E/S/I probes were updated for this contract; inline emphasis markers
-still always hide (caret-local reveal is tracked separately).
+the line rendered while the caret stays in it. An opening fence line stays as
+plain text until Enter terminates it, so typing three backticks (or a partial
+language) never replaces the line with an empty code plate mid-word; once the
+line is complete the plate renders while editing. `chart` / `mermaid` fences stay
+as source while the caret is inside and render only after the caret leaves. The
+caret mapping and A5/C6/E/S/I probes were updated for this contract; inline
+emphasis markers still always hide (caret-local reveal is tracked separately).
+
+While the opening fence is being typed, the completion popup lists fence
+languages (filtered by the partial word; `↑`/`↓` moves, `Enter`/`Tab` accepts and
+opens the block, `Esc` closes). Headings (`#`) and inline-code backticks do not
+open the snippet popup.

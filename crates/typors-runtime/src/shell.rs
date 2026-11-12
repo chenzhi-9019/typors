@@ -412,19 +412,35 @@ impl EditorShell {
             return;
         }
         if self.editor.read(cx).completion().is_some() {
-            match key {
-                "escape" => self.editor.update(cx, |view, _| view.dismiss_completion()),
-                "up" => self.editor.update(cx, |view, _| view.move_completion(-1)),
-                "down" => self.editor.update(cx, |view, _| view.move_completion(1)),
+            // Only the popup's own keys are consumed here. Everything else
+            // (typing, Backspace, arrows) must keep reaching the editor: the
+            // language list is filtered by continuing to type, and a swallowed
+            // Backspace would make a typo impossible to correct without Esc.
+            let handled = match key {
+                "escape" => {
+                    self.editor.update(cx, |view, _| view.dismiss_completion());
+                    true
+                }
+                "up" => {
+                    self.editor.update(cx, |view, _| view.move_completion(-1));
+                    true
+                }
+                "down" => {
+                    self.editor.update(cx, |view, _| view.move_completion(1));
+                    true
+                }
                 "enter" | "tab" => {
                     self.editor.update(cx, |view, _| {
                         view.accept_completion();
                     });
+                    true
                 }
-                _ => {}
+                _ => false,
+            };
+            if handled {
+                cx.notify();
+                return;
             }
-            cx.notify();
-            return;
         }
         if event.keystroke.modifiers.alt {
             let index = match key {
@@ -1179,7 +1195,29 @@ impl Render for EditorShell {
                 .border_color(theme.rule)
                 .shadow_md()
                 .py_1();
-            for (index, item) in state.items.iter().enumerate() {
+            // The language list is long; show a window around the selection,
+            // with ellipsis rows when it is truncated.
+            const MAX_VISIBLE: usize = 8;
+            let start = state
+                .selected
+                .saturating_sub(3)
+                .min(state.items.len().saturating_sub(MAX_VISIBLE));
+            let end = (start + MAX_VISIBLE).min(state.items.len());
+            if start > 0 {
+                popup = popup.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_size(px(11.))
+                        .text_color(theme.muted)
+                        .child("…"),
+                );
+            }
+            for (index, item) in state.items[start..end]
+                .iter()
+                .enumerate()
+                .map(|(offset, item)| (start + offset, item))
+            {
                 popup = popup.child(
                     div()
                         .flex()
@@ -1195,6 +1233,16 @@ impl Render for EditorShell {
                                 .text_color(theme.muted)
                                 .child(item.detail.clone()),
                         ),
+                );
+            }
+            if end < state.items.len() {
+                popup = popup.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_size(px(11.))
+                        .text_color(theme.muted)
+                        .child("…"),
                 );
             }
             root = root.child(popup);
