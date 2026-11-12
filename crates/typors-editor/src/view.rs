@@ -883,6 +883,12 @@ impl MarkdownView {
             .position(|item| item.label.eq_ignore_ascii_case(&info))
             .unwrap_or(0);
         self.dismiss_completion();
+        if std::env::var("TYPORS_PILL_DEBUG").is_ok() {
+            eprintln!(
+                "pill: editor opened block={block_idx} info={info:?} items={} selected={selected}",
+                items.len()
+            );
+        }
         self.fence_edit = Some(FenceLanguageEdit {
             block_idx,
             filter: info,
@@ -1892,6 +1898,14 @@ impl MarkdownView {
             });
         }
         let first = layout.hit(p)?;
+        // Only chart/Mermaid fences switch to the source projection when the caret
+        // enters them; every other block keeps the geometry it was hit in. Building
+        // a source layout for an ordinary code block would measure the click
+        // against the hidden fence lines instead of the rendered code lines, which
+        // is why only the first and last line used to be reachable.
+        if !self.doc.block_is_rich_fence(first.block_idx) {
+            return layout.src_for_display_byte(&self.doc, first.block_idx, first.render_byte);
+        }
         let pending = self.layout_for_source(Some(first.block_idx))?;
         let hit = pending.hit(p).unwrap_or(first);
         pending.src_for_display_byte(&self.doc, hit.block_idx, hit.render_byte)
@@ -2548,10 +2562,30 @@ impl MarkdownView {
     }
 
     fn caret_up(&mut self, _: &CaretUp, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.fence_edit.is_some() {
+            self.fence_language_move(-1);
+            cx.notify();
+            return;
+        }
+        if self.completion.is_some() {
+            self.move_completion(-1);
+            cx.notify();
+            return;
+        }
         self.on_action_move(CaretMove::Up, cx);
     }
 
     fn caret_down(&mut self, _: &CaretDown, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.fence_edit.is_some() {
+            self.fence_language_move(1);
+            cx.notify();
+            return;
+        }
+        if self.completion.is_some() {
+            self.move_completion(1);
+            cx.notify();
+            return;
+        }
         self.on_action_move(CaretMove::Down, cx);
     }
 
@@ -2589,6 +2623,15 @@ impl MarkdownView {
     }
 
     fn newline(&mut self, _: &Newline, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.fence_edit.is_some() {
+            self.fence_language_commit(cx);
+            return;
+        }
+        if self.completion.is_some() {
+            self.accept_completion();
+            cx.notify();
+            return;
+        }
         self.insert_newline();
         cx.notify();
     }

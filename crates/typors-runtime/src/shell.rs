@@ -1313,6 +1313,9 @@ impl Render for EditorShell {
                             .cursor_pointer()
                             .on_click(cx.listener(
                                 move |this, _: &ClickEvent, _window, cx| {
+                                    if std::env::var("TYPORS_PILL_DEBUG").is_ok() {
+                                        eprintln!("pill: chip clicked for block {block_idx}");
+                                    }
                                     this.editor.update(cx, |view, cx| {
                                         view.begin_fence_language_edit(block_idx, cx)
                                     });

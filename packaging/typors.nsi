@@ -18,7 +18,7 @@ Unicode true
 !include "FileFunc.nsh"
 
 !ifndef VERSION
-  !define VERSION "1.0.5"
+  !define VERSION "1.0.6"
 !endif
 
 !define UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\typors"
@@ -211,6 +211,17 @@ Section "typors 核心文件（必需）" SecCore
   !insertmacro WriteScopeRegStr "${UNINST_KEY}" "UninstallString" "$\"$INSTDIR\uninstall.exe$\""
   !insertmacro WriteScopeRegDWORD "${UNINST_KEY}" "NoModify" 1
   !insertmacro WriteScopeRegDWORD "${UNINST_KEY}" "NoRepair" 1
+  ; Windows Search and Win+R find the app through App Paths even when the
+  ; Start-menu shortcut is unchecked by the user.
+  !insertmacro WriteScopeRegStr "Software\Microsoft\Windows\CurrentVersion\App Paths\typors.exe" "" "$INSTDIR\typors.exe"
+  !insertmacro WriteScopeRegStr "Software\Microsoft\Windows\CurrentVersion\App Paths\typors.exe" "Path" "$INSTDIR"
+  ; The shell names the app from Applications	ypors.exe, and RegisteredApplications
+  ; keeps it in Default Programs; both feed the Start-menu app list.
+  !insertmacro WriteScopeRegStr "Software\Classes\Applications\typors.exe" "FriendlyAppName" "typors"
+  !insertmacro WriteScopeRegStr "Software\Classes\Applications\typors.exe\shell\open\command" "" "$\"$INSTDIR\typors.exe$\" $\"%1$\""
+  !insertmacro WriteScopeRegStr "Software\RegisteredApplications" "typors" "Software\typors\Capabilities"
+  !insertmacro WriteScopeRegStr "Software\typors\Capabilities" "ApplicationName" "typors"
+  !insertmacro WriteScopeRegStr "Software\typors\Capabilities" "ApplicationDescription" "Typors Markdown editor"
 SectionEnd
 
 Section /o "关联 Markdown (.md) 文件" SecAssoc
@@ -225,7 +236,7 @@ Section /o "创建桌面快捷方式" SecDesktop
   CreateShortcut "$DESKTOP\typors.lnk" "$INSTDIR\typors.exe" "" "$INSTDIR\assets\typors.ico" 0
 SectionEnd
 
-Section /o "创建开始菜单快捷方式" SecStartMenu
+Section "创建开始菜单快捷方式" SecStartMenu
   CreateDirectory "$SMPROGRAMS\typors"
   CreateShortcut "$SMPROGRAMS\typors\typors.lnk" "$INSTDIR\typors.exe" "" "$INSTDIR\assets\typors.ico" 0
   CreateShortcut "$SMPROGRAMS\typors\卸载 typors.lnk" "$INSTDIR\uninstall.exe"
@@ -258,4 +269,11 @@ Section "Uninstall"
   RMDir "$SMPROGRAMS\typors"
   !insertmacro DeleteScopeRegKey "${UNINST_KEY}"
   !insertmacro DeleteScopeRegKey "Software\typors"
+  !insertmacro DeleteScopeRegKey "Software\Microsoft\Windows\CurrentVersion\App Paths\typors.exe"
+  !insertmacro DeleteScopeRegKey "Software\Classes\Applications\typors.exe"
+  ${If} $InstallScope == "all"
+    DeleteRegValue HKLM "Software\RegisteredApplications" "typors"
+  ${Else}
+    DeleteRegValue HKCU "Software\RegisteredApplications" "typors"
+  ${EndIf}
 SectionEnd

@@ -137,7 +137,7 @@ typors.exe --unregister
 ```powershell
 cargo build --release --workspace
 pwsh packaging\build-nsis.ps1
-# -> packaging\dist\typors-1.0.5-setup.exe
+# -> packaging\dist\typors-1.0.6-setup.exe
 ```
 
 The installer's first choice is **install scope**: every user (Program Files +
@@ -150,8 +150,8 @@ chooses. The core files are the only required section, and the Finish page's
 Silent installs must state the scope:
 
 ```powershell
-typors-1.0.5-setup.exe /S /SCOPE=me /D=C:\path\to\typors
-typors-1.0.5-setup.exe /S /SCOPE=all   # triggers UAC
+typors-1.0.6-setup.exe /S /SCOPE=me /D=C:\path\to\typors
+typors-1.0.6-setup.exe /S /SCOPE=all   # triggers UAC
 ```
 
 The old Inno Setup script (`packaging\typors.iss`) is kept only as history; NSIS

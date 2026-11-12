@@ -32,11 +32,20 @@ README.md
 ```powershell
 pwsh packaging\build-nsis.ps1
 # or: pwsh packaging\build-nsis.ps1 -Version 0.2.0
-# -> packaging\dist\typors-1.0.5-setup.exe
+# -> packaging\dist\typors-1.0.6-setup.exe
 ```
 
 The script passes `/INPUTCHARSET UTF8` to `makensis` because the script and the
 UI strings are UTF-8 Chinese.
+
+## Shortcuts and Windows Search
+
+The Start-menu shortcut is on by default (the desktop shortcut and the .md
+association stay opt-in). The installer also registers
+`Software\Microsoft\Windows\CurrentVersion\App Paths\typors.exe`,
+`Software\Classes\Applications\typors.exe` and a `RegisteredApplications`
+entry, so Start-menu search, Win+R and Default Programs can resolve `typors`
+without relying on the shortcut alone.
 
 ## User choices
 
@@ -61,7 +70,7 @@ Uninstall detects the scope from the machine key and elevates for all-users.
 
 ```powershell
 $dir = "$env:TEMP\typors-install-test"
-.\packaging\dist\typors-1.0.5-setup.exe /S /SCOPE=me /D=$dir
+.\packaging\dist\typors-1.0.6-setup.exe /S /SCOPE=me /D=$dir
 & "$dir\typors.exe" --dump-media "$dir\sample.md"
 & "$dir\uninstall.exe" /S
 ```
