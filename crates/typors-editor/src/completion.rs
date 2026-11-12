@@ -1,7 +1,7 @@
 //! The small Markdown snippet catalog behind the completion popup.
 //!
 //! Two kinds of suggestions: the few Markdown constructs worth a snippet, and the
-//! fence-language list. Headings (#) and inline code (@@BT@@) deliberately do not
+//! fence-language list. Headings (#) and inline code (`) deliberately do not
 //! suggest anything: typing them is faster than picking a snippet, and the only
 //! popup a backtick context needs is the fence language list.
 
@@ -11,9 +11,9 @@ use typors_core::doc::{BlockKind, Document};
 pub struct CompletionItem {
     pub label: String,
     pub detail: String,
-    /// Full text replacing @@BT@@start..caret@@BT@@ when accepted.
+    /// Full text replacing `start..caret` when accepted.
     pub insert: String,
-    /// Caret offset inside @@BT@@insert@@BT@@ (where the user continues typing).
+    /// Caret offset inside `insert` (where the user continues typing).
     pub caret: usize,
 }
 
@@ -92,7 +92,7 @@ const LANGUAGES: &[(&str, &str)] = &[
     ("plaintext", "Plain text"),
 ];
 
-/// A fence opener being typed, as @@BT@@(start of the language text, partial)@@BT@@.
+/// A fence opener being typed, as `(start of the language text, partial)`.
 ///
 /// Only the line start counts, and the info string must be a single word: a
 /// closing fence or a language with attributes is not something to complete.
@@ -110,7 +110,44 @@ fn fence_language(before_caret: &str) -> Option<(usize, String)> {
     Some((indent + 3 + spaces, partial.to_string()))
 }
 
-/// One suggestion, or @@BT@@None@@BT@@ when the typed prefix is ordinary text.
+/// The fence languages matching a filter, for the language editor at the
+/// top-right of a code block.
+pub fn language_items(prefix: &str) -> Vec<CompletionItem> {
+    let lower = prefix.to_ascii_lowercase();
+    LANGUAGES
+        .iter()
+        .filter(|(name, _)| name.starts_with(&lower))
+        .map(|(name, detail)| item(name, detail, name.to_string(), name.len()))
+        .collect()
+}
+
+/// The "no language" entry shown when the filter is empty.
+pub fn plain_language_item() -> CompletionItem {
+    item("(无语言)", "纯代码块", String::new(), 0)
+}
+
+/// Byte range of a fence's info string inside its block source.
+///
+/// Returns None when the first line is not a fence opener (three or more
+/// backticks or tildes). The range excludes the marker and the spaces before the
+/// info, and stops at the first newline, so replacing it rewrites only the
+/// language: "python" -> "rust" keeps the fence and the block body intact.
+pub fn fence_info_range(source: &str, src_start: usize) -> Option<std::ops::Range<usize>> {
+    let first_line_len = source.find('\n').unwrap_or(source.len());
+    let line = &source[..first_line_len];
+    let marker_len = line
+        .chars()
+        .take_while(|ch| *ch == '\u{0060}' || *ch == '~')
+        .count();
+    if marker_len < 3 {
+        return None;
+    }
+    let after = &line[marker_len..];
+    let spaces = after.len() - after.trim_start_matches(' ').len();
+    Some(src_start + marker_len + spaces..src_start + line.len())
+}
+
+/// One suggestion, or `None` when the typed prefix is ordinary text.
 pub fn suggest(doc: &Document, caret: usize) -> Option<CompletionState> {
     let text = doc.text();
     let caret = doc.snap_floor(caret);
@@ -291,6 +328,24 @@ mod tests {
         assert_eq!(state.current().label, "(无语言)");
         state.move_selection(-1);
         assert_eq!(state.current().label, "plaintext");
+    }
+
+    #[test]
+    fn rewriting_the_info_keeps_the_block() {
+        let source = format!("{F}python\nprint(1)\n{F}\n");
+        let range = fence_info_range(&source, 0).expect("info range");
+        assert_eq!(range, 3..9);
+        let mut doc = Document::parse(&source);
+        doc.apply_edit(range, "rust");
+        assert_eq!(doc.text(), format!("{F}rust\nprint(1)\n{F}\n"));
+
+        // Leading spaces before the language stay outside the replaced range.
+        let spaced = format!("{F} python\n");
+        assert_eq!(fence_info_range(&spaced, 10).expect("range"), 14..20);
+        // Not a fence.
+        assert!(fence_info_range("text\n", 0).is_none());
+        // An unfinished opener has an empty info range.
+        assert_eq!(fence_info_range(F, 0).expect("range"), 3..3);
     }
 
     #[test]

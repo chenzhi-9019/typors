@@ -411,6 +411,40 @@ impl EditorShell {
             }
             return;
         }
+        let fence_open = self.editor.read(cx).fence_language().is_some();
+        if fence_open && self.menu.open.is_none() {
+            let handled = match key {
+                "escape" => {
+                    self.editor.update(cx, |view, _| view.fence_language_cancel());
+                    true
+                }
+                "backspace" => {
+                    self.editor.update(cx, |view, _| {
+                        view.fence_language_backspace();
+                    });
+                    true
+                }
+                "up" => {
+                    self.editor.update(cx, |view, _| view.fence_language_move(-1));
+                    true
+                }
+                "down" => {
+                    self.editor.update(cx, |view, _| view.fence_language_move(1));
+                    true
+                }
+                "enter" | "tab" => {
+                    self.editor.update(cx, |view, cx| {
+                        view.fence_language_commit(cx);
+                    });
+                    true
+                }
+                _ => false,
+            };
+            if handled {
+                cx.notify();
+                return;
+            }
+        }
         if self.editor.read(cx).completion().is_some() {
             // Only the popup's own keys are consumed here. Everything else
             // (typing, Backspace, arrows) must keep reaching the editor: the
@@ -1246,6 +1280,147 @@ impl Render for EditorShell {
                 );
             }
             root = root.child(popup);
+        }
+
+        // The fence-language chip and picker for the caret's code block.
+        if !self.preferences.open
+            && self.menu.open.is_none()
+            && let Some((block_idx, bounds, language, editing)) =
+                self.editor.read(cx).fence_pill()
+        {
+            let right = bounds.origin.x.as_f32() + bounds.size.width.as_f32();
+            let top = bounds.origin.y.as_f32() + 8.0;
+            root = root.child(
+                div()
+                    .id("typors-fence-language")
+                    .absolute()
+                    .left(px(right - 96.))
+                    .top(px(top))
+                    .w(px(88.))
+                    .flex()
+                    .justify_end()
+                    .child(
+                        div()
+                            .id("typors-fence-language-chip")
+                            .px_2()
+                            .py(px(2.))
+                            .rounded(px(4.))
+                            .bg(theme.code_bg)
+                            .border_1()
+                            .border_color(theme.rule)
+                            .text_size(px(11.))
+                            .text_color(theme.muted)
+                            .cursor_pointer()
+                            .on_click(cx.listener(
+                                move |this, _: &ClickEvent, _window, cx| {
+                                    this.editor.update(cx, |view, cx| {
+                                        view.begin_fence_language_edit(block_idx, cx)
+                                    });
+                                    cx.notify();
+                                },
+                            ))
+                            .child(SharedString::from(language)),
+                    ),
+            );
+            if editing {
+                let items = self.editor.read(cx).fence_language_items();
+                let selected = self
+                    .editor
+                    .read(cx)
+                    .fence_language_selected()
+                    .unwrap_or(0);
+                let filter = self
+                    .editor
+                    .read(cx)
+                    .fence_language()
+                    .map(|edit| edit.filter.clone())
+                    .unwrap_or_default();
+                let mut picker = div()
+                    .id("typors-fence-language-picker")
+                    .absolute()
+                    .left(px(right - 246.))
+                    .top(px(top + 24.))
+                    .w(px(240.))
+                    .flex()
+                    .flex_col()
+                    .bg(theme.page_bg)
+                    .border_1()
+                    .border_color(theme.rule)
+                    .shadow_md()
+                    .py_1();
+                picker = picker.child(
+                    div()
+                        .px_3()
+                        .py_1()
+                        .text_size(px(13.))
+                        .child(SharedString::from(if filter.is_empty() {
+                            "语言".to_string()
+                        } else {
+                            filter.clone()
+                        })),
+                );
+                const MAX_PICKER: usize = 8;
+                let start = selected
+                    .saturating_sub(3)
+                    .min(items.len().saturating_sub(MAX_PICKER));
+                let end = (start + MAX_PICKER).min(items.len());
+                if start > 0 {
+                    picker = picker.child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_size(px(11.))
+                            .text_color(theme.muted)
+                            .child("…"),
+                    );
+                }
+                for (index, item) in items[start..end]
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, item)| (start + offset, item))
+                {
+                    let item = item.clone();
+                    picker = picker.child(
+                        div()
+                            .id(ElementId::Name(
+                                format!("typors-fence-language-{index}").into(),
+                            ))
+                            .flex()
+                            .justify_between()
+                            .px_3()
+                            .py_1()
+                            .text_size(px(13.))
+                            .when(index == selected, |this| this.bg(theme.selection))
+                            .cursor_pointer()
+                            .on_click(cx.listener(
+                                move |this, _: &ClickEvent, _window, cx| {
+                                    this.editor.update(cx, |view, cx| {
+                                        view.fence_language_choose(index, cx)
+                                    });
+                                    cx.notify();
+                                },
+                            ))
+                            .child(item.label.clone())
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(theme.muted)
+                                    .child(item.detail.clone()),
+                            ),
+                    );
+                }
+                if end < items.len() {
+                    picker = picker.child(
+                        div()
+                            .px_3()
+                            .py_1()
+                            .text_size(px(11.))
+                            .text_color(theme.muted)
+                            .child("…"),
+                    );
+                }
+                root = root.child(picker);
+            }
         }
         root
     }

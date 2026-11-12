@@ -38,6 +38,7 @@ use crate::capture::{
 use crate::ime::MarkedText;
 use crate::media::{MediaContext, paint_image};
 use crate::selection::{HighlightRect, History, HistoryAction, Selection, undo_range};
+use typors_core::doc::BlockKind;
 use typors_core::Document;
 use typors_render::{
     BlockCache, DocLayout, DrawSpan, EditorTheme, LayoutMode, Metrics, ShapeCache, Viewport,
@@ -557,6 +558,8 @@ pub struct MarkdownView {
     editor_viewport: Option<EditorViewport>,
     /// Grab offset (pixels from the thumb top) while dragging the scrollbar.
     scrollbar_drag: Option<f32>,
+    /// The fence-language editor, when it is open for the caret's code block.
+    fence_edit: Option<FenceLanguageEdit>,
     /// Process-wide switches for the streaming pipeline and the persistent
     /// cache (`TYPORS_STREAMING`, `TYPORS_CACHE`).
     features: typors_cache::features::Features,
@@ -617,6 +620,7 @@ impl MarkdownView {
             cull_log: env_flag("TYPORS_CULL_LOG"),
             editor_viewport: None,
             scrollbar_drag: None,
+            fence_edit: None,
             features: typors_cache::features::Features::global(),
             parse_rx: None,
             streaming_override: None,
@@ -836,6 +840,205 @@ impl MarkdownView {
             });
         })
         .detach();
+    }
+
+    /// Whether the fence-language editor is open.
+    pub fn fence_language(&self) -> Option<&FenceLanguageEdit> {
+        self.fence_edit.as_ref()
+    }
+
+    fn fence_items_for(&self, filter: &str) -> Vec<crate::completion::CompletionItem> {
+        let mut items = Vec::new();
+        if filter.trim().is_empty() {
+            items.push(crate::completion::plain_language_item());
+        }
+        items.extend(crate::completion::language_items(filter.trim()));
+        items
+    }
+
+    /// Items currently shown by the fence-language editor.
+    pub fn fence_language_items(&self) -> Vec<crate::completion::CompletionItem> {
+        self.fence_edit
+            .as_ref()
+            .map(|edit| self.fence_items_for(&edit.filter))
+            .unwrap_or_default()
+    }
+
+    pub fn fence_language_selected(&self) -> Option<usize> {
+        self.fence_edit.as_ref().map(|edit| edit.selected)
+    }
+
+    /// Open the language editor for a code block, starting from its info string.
+    pub fn begin_fence_language_edit(&mut self, block_idx: usize, cx: &mut Context<Self>) {
+        let Some(block) = self.doc.blocks().get(block_idx) else {
+            return;
+        };
+        let info = match &block.kind {
+            BlockKind::FencedCode { info } => info.trim().to_string(),
+            _ => return,
+        };
+        let items = self.fence_items_for(&info);
+        let selected = items
+            .iter()
+            .position(|item| item.label.eq_ignore_ascii_case(&info))
+            .unwrap_or(0);
+        self.dismiss_completion();
+        self.fence_edit = Some(FenceLanguageEdit {
+            block_idx,
+            filter: info,
+            selected,
+            fresh: true,
+        });
+        cx.notify();
+    }
+
+    /// Consume typed text as the filter while the editor is open.
+    pub fn fence_language_typed(&mut self, text: &str) {
+        let Some(edit) = &mut self.fence_edit else {
+            return;
+        };
+        let mut changed = false;
+        for ch in text.chars() {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '+' | '#' | '-' | '_' | '.') {
+                if edit.fresh {
+                    edit.filter.clear();
+                    edit.fresh = false;
+                }
+                edit.filter.push(ch.to_ascii_lowercase());
+                changed = true;
+            }
+        }
+        if changed {
+            edit.selected = 0;
+        }
+    }
+
+    pub fn fence_language_backspace(&mut self) -> bool {
+        let Some(edit) = &mut self.fence_edit else {
+            return false;
+        };
+        edit.fresh = false;
+        let changed = edit.filter.pop().is_some();
+        if changed {
+            edit.selected = 0;
+        }
+        changed
+    }
+
+    pub fn fence_language_move(&mut self, delta: isize) {
+        let Some(filter) = self.fence_edit.as_ref().map(|edit| edit.filter.clone()) else {
+            return;
+        };
+        let items = self.fence_items_for(&filter);
+        if items.is_empty() {
+            return;
+        }
+        let len = items.len();
+        if let Some(edit) = &mut self.fence_edit {
+            edit.selected = (edit.selected as isize + delta).rem_euclid(len as isize) as usize;
+        }
+    }
+
+    pub fn fence_language_cancel(&mut self) {
+        self.fence_edit = None;
+    }
+
+    pub fn fence_language_choose(&mut self, index: usize, cx: &mut Context<Self>) {
+        if let Some(edit) = &mut self.fence_edit {
+            edit.selected = index;
+        }
+        self.fence_language_commit(cx);
+    }
+
+    /// Rewrite the fence info with the selected language and close the editor.
+    pub fn fence_language_commit(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(edit) = self.fence_edit.take() else {
+            return false;
+        };
+        let items = self.fence_items_for(&edit.filter);
+        let chosen = items
+            .get(edit.selected)
+            .map(|item| item.label.clone())
+            .unwrap_or_else(|| edit.filter.clone());
+        let language = if chosen == "(无语言)" {
+            String::new()
+        } else {
+            chosen
+        };
+        self.set_fence_language(edit.block_idx, &language);
+        cx.notify();
+        true
+    }
+
+    /// Replace the info string on a code block's opening line, keeping the caret
+    /// inside the block and the edit undoable.
+    pub fn set_fence_language(&mut self, block_idx: usize, language: &str) {
+        let Some(block) = self.doc.blocks().get(block_idx).cloned() else {
+            return;
+        };
+        if !matches!(block.kind, BlockKind::FencedCode { .. }) {
+            return;
+        }
+        let raw = self.doc.rope().slice(block.src.clone()).to_string();
+        let Some(range) = crate::completion::fence_info_range(&raw, block.src.start) else {
+            return;
+        };
+        let (info_start, info_end) = (range.start, range.end);
+        let replacement = language.trim();
+        if self
+            .doc
+            .rope()
+            .slice(info_start..info_end)
+            .to_string()
+            == replacement
+        {
+            return;
+        }
+        let caret = self.caret;
+        let old_len = info_end.saturating_sub(info_start);
+        self.apply_edit_internal(
+            info_start..info_end,
+            replacement,
+            HistoryAction::Record,
+            EditTrigger::Format,
+        );
+        let new_end = info_start + replacement.len();
+        if let Some(caret) = caret {
+            let adjusted = if caret >= info_end {
+                caret - old_len + replacement.len()
+            } else if caret > info_start {
+                new_end
+            } else {
+                caret
+            };
+            self.caret = Some(self.doc.snap_floor(adjusted.min(self.doc.len_bytes())));
+            self.anchor = self.caret;
+            self.desired_x = None;
+        }
+        self.dismiss_completion();
+    }
+
+    /// The language chip for the caret's code block: (block, bounds, label, editing).
+    pub fn fence_pill(&self) -> Option<(usize, Bounds<Pixels>, String, bool)> {
+        let viewport = self.editor_viewport?;
+        let caret = self.caret?;
+        let block_idx = self.doc.block_at_src(caret)?;
+        let block = self.doc.blocks().get(block_idx)?;
+        let info = match &block.kind {
+            BlockKind::FencedCode { info } => info.trim().to_string(),
+            _ => return None,
+        };
+        let bounds = self.layout.as_ref()?.blocks.get(block_idx)?.bounds;
+        let top = bounds.origin.y.as_f32();
+        if top < viewport.top - 1.0 || top > viewport.top + viewport.height - 24.0 {
+            return None;
+        }
+        let label = if info.is_empty() {
+            "text".to_string()
+        } else {
+            info
+        };
+        Some((block_idx, bounds, label, self.fence_edit.is_some()))
     }
 
     pub fn dismiss_completion(&mut self) {
@@ -1092,6 +1295,22 @@ impl MarkdownView {
 pub struct EditorViewport {
     pub top: f32,
     pub height: f32,
+}
+
+/// The language editor at the top-right of a fenced code block.
+///
+/// The box starts as a display of the block's info string; clicking it turns it
+/// into a filter over the language list. Committing rewrites the opening fence
+/// line, so the block keeps its content and the caret stays inside it.
+#[derive(Clone, Debug)]
+pub struct FenceLanguageEdit {
+    pub block_idx: usize,
+    /// What the user has typed so far (the filter, also the initial language).
+    pub filter: String,
+    pub selected: usize,
+    /// The first typed character replaces the pre-filled language instead of
+    /// appending to it (select-all semantics for a small picker).
+    pub fresh: bool,
 }
 
 /// What one caret scroll-into-view correction did, in pixels from the top of the
@@ -2247,6 +2466,10 @@ impl MarkdownView {
 
     /// Insert text at the caret, tagged with the entry point for the log.
     pub fn insert_text_tagged(&mut self, text: &str, trigger: EditTrigger) {
+        if self.fence_edit.is_some() {
+            self.fence_language_typed(text);
+            return;
+        }
         let range = insertion_range(self.caret, self.selection_range());
         self.apply_edit_internal(range, text, HistoryAction::Record, trigger);
     }
@@ -2265,6 +2488,9 @@ impl MarkdownView {
     /// Backspace: remove the selection if there is one, else the char before the
     /// caret, across block boundaries.
     pub fn delete_backward(&mut self) -> bool {
+        if self.fence_edit.is_some() {
+            return self.fence_language_backspace();
+        }
         if let Some(range) = self.selection_range() {
             self.apply_edit_internal(range, "", HistoryAction::Record, EditTrigger::Backspace);
             return true;
@@ -2453,6 +2679,9 @@ impl MarkdownView {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus_handle, cx);
+        if self.fence_edit.is_some() {
+            self.fence_edit = None;
+        }
         // The overlay scrollbar owns presses inside its band: it must not move the
         // caret, and dragging it must not start a text selection.
         let window_height = window.viewport_size().height.as_f32();
@@ -2722,6 +2951,14 @@ impl EntityInputHandler for MarkdownView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Keyboard input arrives here, not through insert_text_tagged. While the
+        // fence-language picker is open the characters filter it instead of
+        // editing the document.
+        if self.fence_edit.is_some() {
+            self.fence_language_typed(text);
+            cx.notify();
+            return;
+        }
         let composite = self.composite_text();
         let before = crate::ime::state(self);
         let (range, committed) = match self.marked.as_ref().filter(|m| !m.is_empty()) {

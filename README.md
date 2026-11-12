@@ -243,3 +243,10 @@ While the opening fence is being typed, the completion popup lists fence
 languages (filtered by the partial word; `↑`/`↓` moves, `Enter`/`Tab` accepts and
 opens the block, `Esc` closes). Headings (`#`) and inline-code backticks do not
 open the snippet popup.
+
+With the caret inside a fenced block, a language chip sits at the block's
+top-right. Click it to edit the language in place: the chip becomes a filter
+box over the same language list (typing replaces the current value, `Backspace`
+edits it, `Enter`/`Tab` commits the selected language to the fence line,
+`Esc` or a click in the page cancels). Changing the language keeps the block
+body and the caret position.

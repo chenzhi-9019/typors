@@ -4508,6 +4508,39 @@ mod tests {
         assert_eq!(clamped, 0.);
     }
 
+
+    #[test]
+    fn choosing_a_language_renders_the_block_with_the_caret_inside() {
+        // The completion item for "py" inserts "python\n": the fence opens and the
+        // caret lands on the block's first content line.
+        let mut doc = Document::parse("```py");
+        doc.apply_edit(3..5, "python\n");
+        let info = match &doc.blocks()[0].kind {
+            typors_core::doc::BlockKind::FencedCode { info } => info.clone(),
+            other => panic!("not a code block after choosing a language: {other:?}"),
+        };
+        assert_eq!(info, "python");
+
+        let mut layout = DocLayout::layout_mode_marked(
+            &doc,
+            &EditorTheme::default(),
+            Arc::new(ApproxMetrics),
+            point(px(0.), px(0.)),
+            px(600.),
+            LayoutMode::RENDERED,
+            None,
+        );
+        layout.ensure_caret_line(&doc, Some(doc.len_bytes()));
+        let block = &layout.blocks[0];
+        let caret = layout.caret_bounds(0, 0).expect("caret in the block");
+        assert!(
+            caret.origin.y.as_f32() >= block.bounds.origin.y.as_f32()
+                && caret.bottom().as_f32() <= block.bounds.bottom().as_f32() + 0.5,
+            "caret {caret:?} is not on the block's first line (block {:?})",
+            block.bounds
+        );
+    }
+
     #[test]
     fn source_slice_reads_one_block_out_of_the_rope() {
         let doc = Document::parse(DOC);
