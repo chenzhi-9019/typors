@@ -74,6 +74,7 @@ enum Mode {
     DumpSettings,
     DumpBlank,
     DumpMenu,
+    DumpSession,
 }
 
 pub fn run() {
@@ -94,6 +95,7 @@ pub fn run() {
             "--dump-settings" => mode = Mode::DumpSettings,
             "--dump-blank" => mode = Mode::DumpBlank,
             "--dump-menu" => mode = Mode::DumpMenu,
+            "--dump-session" => mode = Mode::DumpSession,
             "--dump-newlines" => {
                 // Optional `<block>:<byte>` caret position, same syntax as
                 // --dump-cursor. Default: the end of the buffer.
@@ -153,7 +155,18 @@ pub fn run() {
     // keeps as plain text and the renderer draws as nothing (the same failure
     // shape as "my newline did not appear").
     let text = typors_editor::view::normalize_newlines(&text).into_owned();
-    let doc = Document::parse(&text);
+    // Large files paint their first page from a safe prefix while a background
+    // thread parses the rest; the completed table is a whole-file parse, so the
+    // final document is identical either way.
+    const PROGRESSIVE_THRESHOLD: usize = 256 * 1024;
+    // Probes compare whole-document geometry, so they always open a complete
+    // document; only the product window uses the progressive open.
+    let progressive = matches!(mode, Mode::Window { .. }) && text.len() > PROGRESSIVE_THRESHOLD;
+    let doc = if progressive {
+        Document::parse_progressive(&text, PROGRESSIVE_THRESHOLD)
+    } else {
+        Document::parse(&text)
+    };
     eprintln!(
         "typors: loaded {} bytes, {} blocks from {}",
         doc.len_bytes(),
@@ -165,7 +178,11 @@ pub fn run() {
     );
 
     match mode {
-        Mode::Window { fps } => open_window(source, doc, fps),
+        Mode::Window { fps } => {
+            let remainder = doc.is_parsing().then(|| text.clone());
+            let id = crate::session_wire::DocumentId::of(&source, &text);
+            open_window(source, doc, remainder, id, fps)
+        }
         Mode::DumpLayout => dump_layout(source, doc),
         Mode::DumpCursor(target) => run_probe(source, doc, ProbeKind::Cursor(target)),
         Mode::DumpEdit => run_probe(source, doc, ProbeKind::Edit),
@@ -180,6 +197,7 @@ pub fn run() {
         Mode::DumpSettings => dump_settings(),
         Mode::DumpBlank => dump_blank(source, doc),
         Mode::DumpMenu => dump_menu(),
+        Mode::DumpSession => dump_session(),
     }
 }
 
@@ -296,6 +314,93 @@ fn dump_settings() {
     std::process::exit(if ok { 0 } else { 1 });
 }
 
+fn dump_session() {
+    use typors_cache::session::{SessionStore, content_hash};
+
+    let dir = std::env::temp_dir().join(format!("typors-session-probe-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("sessions.json");
+    let document = r"C:\probe\notes.md";
+    let text = "# title\n\nparagraph text\n";
+    let mut checks: Vec<(String, bool, String)> = Vec::new();
+
+    let mut store = SessionStore::load_from(&path);
+    store.record(document, 9, 120.5, text.len() as u64, &content_hash(text), 1000);
+    checks.push((
+        "S1 record + atomic save".to_string(),
+        store.save().is_ok() && path.is_file(),
+        format!("{}", path.display()),
+    ));
+
+    let loaded = SessionStore::load_from(&path);
+    let record = loaded.get(document).cloned();
+    checks.push((
+        "S2 reload returns the recorded offsets".to_string(),
+        record
+            .as_ref()
+            .is_some_and(|r| r.caret == 9 && (r.scroll - 120.5).abs() < 0.01),
+        format!("{record:?}"),
+    ));
+
+    let unchanged = loaded
+        .matches(document, text.len() as u64, &content_hash(text))
+        .is_some();
+    checks.push((
+        "S3 unchanged file matches, same offsets restored".to_string(),
+        unchanged,
+        format!("match={unchanged}, len={}", text.len()),
+    ));
+
+    let changed = loaded
+        .matches(document, text.len() as u64, &content_hash(&format!("{text}edited")))
+        .is_none();
+    checks.push((
+        "S4 edited file is not restored blindly".to_string(),
+        changed,
+        "hash changed".to_string(),
+    ));
+
+    // A shrank file: the caret clamps inside the new content.
+    let shorter = Document::parse("short\n");
+    let caret = record
+        .as_ref()
+        .map(|r| r.caret.min(shorter.len_bytes()))
+        .unwrap_or(usize::MAX);
+    checks.push((
+        "S5 caret is clamped when the file shrank".to_string(),
+        caret <= shorter.len_bytes(),
+        format!("caret={caret} of {}", shorter.len_bytes()),
+    ));
+
+    let corrupt = dir.join("corrupt.json");
+    let _ = std::fs::write(&corrupt, b"{not json");
+    let recovered = SessionStore::load_from(&corrupt);
+    checks.push((
+        "S6 corrupt store recovers empty with a warning".to_string(),
+        recovered.is_empty() && recovered.warning().is_some(),
+        format!("{:?}", recovered.warning()),
+    ));
+
+    let readonly = SessionStore::load_from(r"Z:\typors-probe\no\such\dir\sessions.json");
+    let failed = readonly.clone().save().is_err();
+    checks.push((
+        "S7 unwritable store fails softly".to_string(),
+        failed,
+        "save returned an error, no panic".to_string(),
+    ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+    let ok = checks.iter().all(|(_, pass, _)| *pass);
+    println!("# session dump\n");
+    println!("store: {}", SessionStore::path().display());
+    for (name, pass, detail) in &checks {
+        println!("  [{}] {name} — {detail}", if *pass { "ok" } else { "FAIL" });
+    }
+    println!("\nresult: {}", if ok { "PASS" } else { "FAIL" });
+    std::process::exit(if ok { 0 } else { 1 });
+}
+
 fn parse_target(raw: &str) -> Option<(usize, usize)> {
     let (block, byte) = raw.split_once(':')?;
     Some((block.parse().ok()?, byte.parse().ok()?))
@@ -317,7 +422,7 @@ fn load(path: Option<String>) -> (Option<PathBuf>, String) {
             eprintln!(
                 "usage: typors \
                  [--dump-layout|--dump-cursor [<block>:<byte>]|--dump-edit|--dump-newlines \
-                 [<block>:<byte>]|--dump-ime|--dump-select|--dump-perf|--dump-blank|--dump-menu|--dump-blink|--dump-completion|--dump-settings] [<file.md>]"
+                 [<block>:<byte>]|--dump-ime|--dump-select|--dump-perf|--dump-blank|--dump-menu|--dump-blink|--dump-completion|--dump-settings|--dump-cache|--dump-session|--dump-chart|--cache-status|--clear-cache] [<file.md>]"
             );
             (None, String::new())
         }
@@ -346,7 +451,39 @@ fn window_options() -> WindowOptions {
 
 // ---------------------------------------------------------------- window mode
 
-fn open_window(source: Option<PathBuf>, doc: Document, fps: bool) {
+/// Open the cache store, evict to the configured cap, drop entries for a changed
+/// file and hand the document's cache to the view.
+fn attach_document_cache(
+    view: &Entity<MarkdownView>,
+    id: Option<&crate::session_wire::DocumentId>,
+    max_mb: u32,
+    cx: &mut App,
+) {
+    let (Some(id), Some(root)) = (id, typors_cache::root::CacheRoot::resolve().path().map(|p| p.to_path_buf())) else {
+        return;
+    };
+    let Ok(mut store) = typors_cache::store::CacheStore::open(&root) else {
+        return;
+    };
+    let now = typors_cache::store::now();
+    store.adopt_orphans(now);
+    store.gc(u64::from(max_mb).saturating_mul(1024 * 1024));
+    if !store.validate(&id.path, id.size, &id.hash) {
+        let _ = store.invalidate_document(&id.path);
+    }
+    if let Ok(cache) = store.register(&id.path, now) {
+        view.update(cx, |view, _cx| view.set_document_cache(Some(cache)));
+    }
+    let _ = store.note_document(&id.path, id.size, &id.hash, 1.0, "", now);
+}
+
+fn open_window(
+    source: Option<PathBuf>,
+    doc: Document,
+    remainder: Option<String>,
+    id: Option<crate::session_wire::DocumentId>,
+    fps: bool,
+) {
     let name = name_of(&source);
     // `TYPORS_EXIT_DUMP=<ms>`: after that many milliseconds, print the buffer and
     // the caret (escaped) and quit. It exists so a real window can be driven from
@@ -389,8 +526,22 @@ fn open_window(source: Option<PathBuf>, doc: Document, fps: bool) {
                     MarkdownView::new(doc.clone(), cx)
                 };
                 view.set_doc_dir(doc_dir.clone());
+                if let Some(text) = remainder.clone() {
+                    view.start_progressive_parse(text, cx);
+                }
                 view
             });
+            // Restore the reading position before the first layout, then keep a
+            // periodic checkpoint so an abnormal exit loses little.
+            if let Some(id) = id.as_ref() {
+                crate::session_wire::restore(&view, id, cx);
+                crate::session_wire::spawn_checkpoint(view.clone(), id.clone(), cx);
+            }
+            // Attach the persistent render cache for this document. A missing or
+            // read-only root is a silent no-op.
+            if typors_cache::features::Features::global().cache && shell_settings.files.cache_enabled {
+                attach_document_cache(&view, id.as_ref(), shell_settings.files.cache_max_mb, cx);
+            }
             let focus = view.read(cx).focus_handle().clone();
             window.focus(&focus, cx);
             if let Ok(mut guard) = view_open.lock() {
@@ -406,10 +557,18 @@ fn open_window(source: Option<PathBuf>, doc: Document, fps: bool) {
                 )
             });
             let shell_close = shell.downgrade();
+            let view_close = view.clone();
+            let id_close = id.clone();
             window.on_window_should_close(cx, move |window, cx| {
-                shell_close
+                let close = shell_close
                     .update(cx, |shell, cx| shell.confirm_close(window, cx))
-                    .unwrap_or(true)
+                    .unwrap_or(true);
+                if close
+                    && let Some(id) = id_close.as_ref()
+                {
+                    crate::session_wire::record(&view_close, id, cx);
+                }
+                close
             });
             shell
         });

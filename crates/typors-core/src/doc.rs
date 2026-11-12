@@ -179,6 +179,13 @@ pub struct Document {
     rope: Rope,
     blocks: Vec<Block>,
     revision: u64,
+    /// Bytes covered by `blocks`. Smaller than `len_bytes()` while a
+    /// progressive parse is still publishing the rest of the file.
+    parsed_bytes: usize,
+    /// True when `blocks` covers the whole buffer.
+    complete: bool,
+    /// Blocks the newest edit reparsed, for diagnostics.
+    last_edit_blocks: usize,
 }
 
 impl Document {
@@ -187,21 +194,384 @@ impl Document {
             rope: Rope::from_str(text),
             blocks: parse_blocks(text),
             revision: 0,
+            parsed_bytes: text.len(),
+            complete: true,
+            last_edit_blocks: 0,
         }
     }
 
+    /// Parse only a safe prefix of `text` so the first frame can paint before
+    /// the whole file has been parsed.
+    ///
+    /// The prefix ends at a line boundary outside a fence when one is available
+    /// within `chunk` bytes. The provisional block table is then replaced by
+    /// `finish_progressive` with a whole-file parse, so the completed document is
+    /// identical to `parse` by construction.
+    pub fn parse_progressive(text: &str, chunk: usize) -> Self {
+        let cut = safe_prefix(text, chunk.max(1));
+        let mut document = Document {
+            rope: Rope::from_str(text),
+            blocks: parse_blocks(&text[..cut]),
+            revision: 0,
+            parsed_bytes: cut,
+            complete: cut >= text.len(),
+            last_edit_blocks: 0,
+        };
+        if document.complete {
+            document.blocks = parse_blocks(text);
+            document.parsed_bytes = text.len();
+        }
+        document
+    }
+
+    /// Parse a whole text without keeping a document around, for a background
+    /// thread that hands the block table back to the UI.
+    pub fn parse_blocks_for(text: &str) -> Vec<Block> {
+        parse_blocks(text)
+    }
+
+    /// Replace a progressive block table with the result of the whole-file parse.
+    pub fn finish_progressive(&mut self, blocks: Vec<Block>) {
+        if self.complete {
+            return;
+        }
+        self.blocks = blocks;
+        self.parsed_bytes = self.rope.len();
+        self.complete = true;
+    }
+
+    /// True while the tail of the file is still being parsed in the background.
+    pub fn is_parsing(&self) -> bool {
+        !self.complete
+    }
+
+    /// Bytes covered by the current block table.
+    pub fn parsed_bytes(&self) -> usize {
+        self.parsed_bytes
+    }
+
+    /// Blocks the newest edit reparsed (0 for a load, the whole table for a
+    /// fallback parse).
+    pub fn last_edit_blocks(&self) -> usize {
+        self.last_edit_blocks
+    }
+
     /// Replace `src` with `replace_with` in the single buffer and reparse.
-    /// (The later groups drive this from the UI; the mapping must survive it.)
+    ///
+    /// The parser is local: only the blank-line-separated unit that owns the
+    /// edit is sliced out of the rope and reparsed. The whole-document parse is
+    /// kept as the correctness oracle and is used whenever the edit cannot be
+    /// proven local (a gap-only unit, an edit while the file is still being
+    /// parsed, or a unit whose reparse does not cover exactly the same bytes).
     pub fn apply_edit(&mut self, src: Range<usize>, replace_with: &str) {
         let start = self.snap_floor(src.start);
         let end = self.snap_ceil(src.end.max(start));
+        let old_len = self.rope.len();
+        let unit = self.unit_for_edit(start, end);
         self.rope.remove(start..end);
         if !replace_with.is_empty() {
             self.rope.insert(start, replace_with);
         }
         self.revision += 1;
+        let delta = self.rope.len() as isize - old_len as isize;
+
+        if !self.complete {
+            // An edit during the progressive parse promotes to a full parse: a
+            // background result must never overwrite what the user just typed.
+            self.reparse_all();
+            return;
+        }
+        if let Some((first, last, unit_start, unit_end)) = unit {
+            let unit_end = (unit_end as isize + delta).max(unit_start as isize) as usize;
+            if self.reparse_unit(first, last, unit_start, unit_end, delta) {
+                self.parsed_bytes = self.rope.len();
+                self.refresh_toc();
+                return;
+            }
+        }
+        self.reparse_all();
+    }
+
+    fn reparse_all(&mut self) {
         let text = self.rope.to_string();
         self.blocks = parse_blocks(&text);
+        self.parsed_bytes = self.rope.len();
+        self.complete = true;
+        self.last_edit_blocks = self.blocks.len();
+    }
+
+    /// The parse unit that owns `byte`: a run of non-gap blocks plus the blank-line
+    /// gap that follows it, so the slice always ends at the next block's start and
+    /// a newline inserted at the end of the unit is unambiguous.
+    ///
+    /// Returns `(first_block, last_block, src_start, src_end)`.
+    fn unit_for_edit(
+        &self,
+        byte: usize,
+        end: usize,
+    ) -> Option<(usize, usize, usize, usize)> {
+        if self.blocks.is_empty() {
+            return None;
+        }
+        let hit = self
+            .block_at_src(byte)
+            .or_else(|| self.blocks.len().checked_sub(1))?;
+        // A gap owns the bytes between two blocks. An edit there belongs to the
+        // block before it (typing at the end of a line), or to the block after it
+        // when there is nothing before.
+        let touched = if matches!(self.blocks[hit].kind, BlockKind::Gap) {
+            (0..hit)
+                .rev()
+                .find(|&idx| !matches!(self.blocks[idx].kind, BlockKind::Gap))
+                .or_else(|| {
+                    (hit + 1..self.blocks.len())
+                        .find(|&idx| !matches!(self.blocks[idx].kind, BlockKind::Gap))
+                })?
+        } else {
+            hit
+        };
+        // Code fences are document-structural: changing a fence line can open or
+        // close a block far past the unit, so those edits take the whole-document
+        // path. An indented code block's extent also depends on its neighbours.
+        let block = &self.blocks[touched];
+        match &block.kind {
+            BlockKind::IndentedCode => return None,
+            BlockKind::FencedCode { .. } => {
+                let first_line_end = block.src.start
+                    + block.src.len().min(
+                        self.rope
+                            .slice(block.src.start..block.src.end)
+                            .to_string()
+                            .find('\n')
+                            .map(|offset| offset + 1)
+                            .unwrap_or(block.src.len()),
+                    );
+                let last_line_start = block.src.start
+                    + self
+                        .rope
+                        .slice(block.src.start..block.src.end)
+                        .to_string()
+                        .rfind('\n')
+                        .map(|offset| offset + 1)
+                        .unwrap_or(0);
+                let overlaps_first = byte <= first_line_end;
+                let overlaps_last = end >= last_line_start && last_line_start > block.src.start;
+                // An unclosed fence runs to the end of the document, so nothing
+                // after the unit is a block and a local slice would invent some.
+                let unclosed = block.src.end >= self.rope.len();
+                if overlaps_first || overlaps_last || unclosed {
+                    return None;
+                }
+            }
+            BlockKind::Html => return None,
+            _ => {}
+        }
+        let mut first = touched;
+        while first > 0 && !matches!(self.blocks[first - 1].kind, BlockKind::Gap) {
+            first -= 1;
+        }
+        let mut last = touched;
+        while last + 1 < self.blocks.len() && !matches!(self.blocks[last + 1].kind, BlockKind::Gap) {
+            last += 1;
+        }
+        // Include the trailing gap so the unit ends on a block boundary.
+        let last_non_gap = last;
+        if last + 1 < self.blocks.len() && matches!(self.blocks[last + 1].kind, BlockKind::Gap) {
+            last += 1;
+        }
+        // Deleting the line break that separates this unit from the next one
+        // merges the two, so the edit is not local any more: that covers the
+        // unit's own trailing newline as well as the gap's.
+        if end > byte && end >= self.blocks[last_non_gap].src.end {
+            return None;
+        }
+        if last > last_non_gap
+            && end > self.blocks[last].src.start
+            && self.blocks[last].src.start >= self.blocks[last_non_gap].src.end
+        {
+            return None;
+        }
+        Some((
+            first,
+            last,
+            self.blocks[first].src.start,
+            self.blocks[last].src.end,
+        ))
+    }
+
+    /// Reparse `src_start..src_end` and splice it over `first..=last`.
+    ///
+    /// A backward context window (the enclosing list or quote) is included in the
+    /// parse input so an item separated from its parent by a blank line keeps its
+    /// nesting level; blocks that end at or before `src_start` are discarded
+    /// afterwards. `delta` is the length change of the edit and shifts every block
+    /// after the spliced unit.
+    fn reparse_unit(
+        &mut self,
+        first: usize,
+        last: usize,
+        src_start: usize,
+        src_end: usize,
+        delta: isize,
+    ) -> bool {
+        if src_end <= src_start {
+            return false;
+        }
+        let text_len = self.rope.len();
+        // Parse the unit together with one following block as lookahead: a
+        // paragraph's last line can only be understood against the line after it
+        // (a setext underline, a new fence, a list marker). The lookahead is
+        // never spliced; it only proves where the unit really ends.
+        // Old block offsets are pre-edit; everything after the edit shifts by
+        // delta to line up with the new buffer.
+        let shift_after_edit = |offset: usize| -> usize {
+            if offset >= src_start {
+                (offset as isize + delta).max(0) as usize
+            } else {
+                offset
+            }
+        };
+        let mut context_end = src_end;
+        let mut index = last + 1;
+        while index < self.blocks.len() {
+            context_end = shift_after_edit(self.blocks[index].src.end);
+            let is_gap = matches!(self.blocks[index].kind, BlockKind::Gap);
+            index += 1;
+            if is_gap {
+                break;
+            }
+        }
+        if context_end - src_start > 65_536 {
+            context_end = src_end;
+        }
+        let context_start = self.context_window_start(first);
+        let slice = self.rope.slice(context_start..context_end).to_string();
+        let mut fresh = parse_blocks(&slice);
+        shift_blocks(&mut fresh, context_start);
+        fresh.retain(|block| block.src.end > src_start);
+        if fresh.is_empty() {
+            return false;
+        }
+        // The unit must be reproduced exactly: contiguous from src_start to
+        // src_end, and no block may cross the boundary (crossing means the edit
+        // merged the unit with what follows, so the edit was not local).
+        let mut cursor = src_start;
+        let mut unit_len = 0usize;
+        for block in &fresh {
+            if block.src.start >= src_end {
+                break;
+            }
+            if block.src.start != cursor || block.src.end > src_end {
+                return false;
+            }
+            cursor = block.src.end;
+            unit_len += 1;
+        }
+        if cursor != src_end || src_end > text_len || unit_len == 0 {
+            return false;
+        }
+        // What follows must still begin exactly where it did, with the same kind;
+        // otherwise the lookahead itself changed structure and the whole document
+        // is the only correct answer.
+        let mut next_expected = last + 1;
+        while next_expected < self.blocks.len()
+            && shift_after_edit(self.blocks[next_expected].src.start) < src_end
+        {
+            next_expected += 1;
+        }
+        let rest = &fresh[unit_len..];
+        if next_expected < self.blocks.len() {
+            let expected = &self.blocks[next_expected];
+            let Some(actual) = rest.first() else {
+                return false;
+            };
+            if actual.src.start != src_end || actual.kind != expected.kind {
+                return false;
+            }
+        } else if !rest.is_empty() {
+            return false;
+        }
+        let unit_blocks: Vec<Block> = fresh.drain(..unit_len).collect();
+        let reparsed = unit_blocks.len();
+        let after = first + reparsed;
+        self.blocks.splice(first..=last, unit_blocks);
+        if delta != 0 {
+            for block in &mut self.blocks[after..] {
+                shift_block(block, delta);
+            }
+        }
+        self.last_edit_blocks = reparsed;
+        true
+    }
+
+    /// Start of the enclosing list or quote, used as parse context so nesting
+    /// levels survive a blank line. Bounded to 64 KiB so a pathological document
+    /// cannot turn every keystroke into a whole-file slice.
+    fn context_window_start(&self, first: usize) -> usize {
+        let mut start = self.blocks[first].src.start;
+        let mut index = first;
+        while index > 0 {
+            let previous = &self.blocks[index - 1];
+            let family = matches!(
+                previous.kind,
+                BlockKind::ListItem { .. } | BlockKind::BlockQuote | BlockKind::Gap
+            );
+            if !family || start <= previous.src.start || start - previous.src.start > 65_536 {
+                break;
+            }
+            start = previous.src.start;
+            index -= 1;
+        }
+        start
+    }
+
+    /// Rebuild the `[toc]` block after an edit changed the heading outline.
+    /// Cheap no-op for documents without a TOC marker.
+    fn refresh_toc(&mut self) {
+        let toc_idx = self.blocks.iter().position(|block| {
+            block.kind == BlockKind::Paragraph
+                && self
+                    .rope
+                    .slice(block.src.start..block.src.end)
+                    .to_string()
+                    .trim()
+                    .eq_ignore_ascii_case("[toc]")
+        });
+        let Some(toc_idx) = toc_idx else {
+            return;
+        };
+        let entries: Vec<(u8, String)> = self
+            .blocks
+            .iter()
+            .filter_map(|block| match block.kind {
+                BlockKind::Heading { level } => Some((level, block.render.clone())),
+                _ => None,
+            })
+            .collect();
+        let mut rendered = String::new();
+        if entries.is_empty() {
+            rendered.push_str("（暂无标题）");
+        } else {
+            for (index, (level, title)) in entries.iter().enumerate() {
+                if index > 0 {
+                    rendered.push('\n');
+                }
+                rendered.push_str(&"  ".repeat((*level as usize).saturating_sub(1)));
+                rendered.push_str("• ");
+                rendered.push_str(title);
+            }
+        }
+        let block = &mut self.blocks[toc_idx];
+        block.render = rendered.clone();
+        block.spans = vec![Span {
+            src: block.src.clone(),
+            render: 0..rendered.len(),
+            kind: SpanKind::Text,
+            style: Style {
+                link: true,
+                ..Style::PLAIN
+            },
+        }];
     }
 
     pub fn text(&self) -> String {
@@ -751,6 +1121,77 @@ fn inline_html_action(tag: &str, current: Style) -> InlineHtml {
         // Unknown inline tags are stripped; their text remains.
         _ if lower.starts_with('<') => InlineHtml::Text,
         _ => InlineHtml::Text,
+    }
+}
+
+/// Largest prefix of `text` up to `chunk` bytes that ends at the start of a
+/// line following a blank line outside a fenced code block. Falls back to the
+/// last line boundary, then to the limit itself.
+fn safe_prefix(text: &str, chunk: usize) -> usize {
+    let limit = chunk.min(text.len());
+    if limit >= text.len() {
+        return text.len();
+    }
+    let mut open: Option<char> = None;
+    let mut previous_blank = false;
+    let mut best: Option<usize> = None;
+    let mut last_newline: Option<usize> = None;
+    let mut offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        let start = offset;
+        offset += line.len();
+        if start >= limit {
+            break;
+        }
+        if line.ends_with('\n') {
+            last_newline = Some(offset);
+        }
+        let content = line.trim_end_matches(['\n', '\r']);
+        let trimmed = content.trim_start();
+        let fence_char = trimmed.chars().next().filter(|ch| *ch == '`' || *ch == '~');
+        let fence_like = fence_char.is_some_and(|ch| trimmed.chars().take_while(|c| *c == ch).count() >= 3);
+        if fence_like {
+            match (open, fence_char) {
+                (None, Some(ch)) => open = Some(ch),
+                (Some(current), Some(ch)) if current == ch => open = None,
+                _ => {}
+            }
+            previous_blank = false;
+            continue;
+        }
+        if open.is_none() && previous_blank && start > 0 && start <= limit {
+            best = Some(start);
+        }
+        previous_blank = content.trim().is_empty();
+    }
+    best.or(last_newline).unwrap_or(limit)
+}
+
+/// Move every source offset in one block by `by` bytes.
+fn shift_block(block: &mut Block, by: isize) {
+    let move_range = |range: &mut Range<usize>| {
+        *range = (range.start as isize + by).max(0) as usize..(range.end as isize + by).max(0) as usize;
+    };
+    move_range(&mut block.src);
+    for span in &mut block.spans {
+        move_range(&mut span.src);
+    }
+    if let Some(table) = &mut block.table {
+        for row in &mut table.rows {
+            for cell in row {
+                move_range(cell);
+            }
+        }
+    }
+}
+
+/// Move every source offset in `blocks` by `by` bytes.
+fn shift_blocks(blocks: &mut [Block], by: usize) {
+    if by == 0 {
+        return;
+    }
+    for block in blocks.iter_mut() {
+        shift_block(block, by as isize);
     }
 }
 
@@ -1973,5 +2414,173 @@ mod tests {
             "规避写法丢了内层斜体：{:?}",
             spelled_block.spans
         );
+    }
+
+    // ------------------------------------------------ local reparse / streaming
+
+    fn assert_matches_full_parse(doc: &Document, context: &str) {
+        let text = doc.text();
+        let full = Document::parse(&text);
+        if doc.blocks().len() != full.blocks().len() {
+            println!("LOCAL blocks:");
+            for (i, b) in doc.blocks().iter().enumerate() {
+                println!("  {i}: {:?} {:?} {:?}", b.kind, b.src, b.render);
+            }
+            println!("FULL blocks:");
+            for (i, b) in full.blocks().iter().enumerate() {
+                println!("  {i}: {:?} {:?} {:?}", b.kind, b.src, b.render);
+            }
+        }
+        assert_eq!(
+            doc.blocks().len(),
+            full.blocks().len(),
+            "{context}: block count differs for {:?}",
+            text
+        );
+        for (index, (local, expected)) in doc.blocks().iter().zip(full.blocks()).enumerate() {
+            assert_eq!(local, expected, "{context}: block {index} differs");
+        }
+    }
+
+    #[test]
+    fn progressive_parse_completes_to_the_same_document() {
+        let mut text = String::new();
+        for index in 0..40 {
+            text.push_str(&format!("# heading {index}\n\nparagraph {index} with **bold** text.\n\n"));
+            if index % 7 == 0 {
+                text.push_str("```rust\nlet x = 1;\n```\n\n");
+            }
+        }
+        let progressive = Document::parse_progressive(&text, 200);
+        assert!(progressive.is_parsing());
+        assert!(progressive.parsed_bytes() > 0);
+        assert!(progressive.parsed_bytes() < text.len());
+
+        let mut finished = progressive.clone();
+        finished.finish_progressive(parse_blocks(&text));
+        assert!(!finished.is_parsing());
+        assert_matches_full_parse(&finished, "progressive");
+    }
+
+    #[test]
+    fn progressive_prefix_never_cuts_inside_a_fence() {
+        let text = "intro\n\n```rust\nfn a() {}\n\nfn b() {}\n```\n\ntail\n";
+        let cut = text.find("fn b").unwrap() + 2;
+        let progressive = Document::parse_progressive(text, cut);
+        let prefix = &text[..progressive.parsed_bytes()];
+        assert!(
+            !prefix.trim_end().ends_with("fn a() {}"),
+            "cut fell inside the fence: {prefix:?}"
+        );
+        assert!(progressive.is_parsing());
+    }
+
+    #[test]
+    fn local_edit_reparses_one_unit_and_matches_a_full_parse() {
+        let mut text = String::new();
+        for index in 0..300 {
+            text.push_str(&format!("paragraph {index} text\n\n"));
+        }
+        let mut doc = Document::parse(&text);
+        let offset = text.find("paragraph 150").unwrap() + 3;
+        doc.apply_edit(offset..offset, "X");
+        assert!(
+            doc.last_edit_blocks() <= 2,
+            "edit reparsed {} blocks instead of one unit",
+            doc.last_edit_blocks()
+        );
+        assert_matches_full_parse(&doc, "paragraph edit");
+
+        doc.apply_edit(offset..offset, "\n");
+        assert_matches_full_parse(&doc, "split edit");
+    }
+
+    #[test]
+    fn local_edit_handles_structure_changes() {
+        let mut doc = Document::parse("alpha\n\nbeta\n\ngamma\n");
+        let offset = "alpha\n\nbeta".len();
+        doc.apply_edit(offset..offset, "\n\n# new heading\n");
+        assert_matches_full_parse(&doc, "heading insert");
+
+        let paragraph = doc.text().find("alpha").unwrap() + 5;
+        doc.apply_edit(paragraph..paragraph, "\n=======\n");
+        assert_matches_full_parse(&doc, "setext heading");
+    }
+
+    #[test]
+    fn local_edit_keeps_loose_nested_list_levels() {
+        let mut doc = Document::parse("- parent\n\n  - child\n\n    - grandchild\n\n- other\n");
+        let offset = doc.text().find("grandchild").unwrap() + 3;
+        doc.apply_edit(offset..offset, "Z");
+        assert_matches_full_parse(&doc, "nested loose list");
+
+        let third = doc.text().find("other").unwrap() + 2;
+        doc.apply_edit(third..third, "Q");
+        assert_matches_full_parse(&doc, "sibling item");
+    }
+
+    #[test]
+    fn edit_during_the_progressive_parse_promotes_to_a_full_parse() {
+        let mut text = String::new();
+        for index in 0..50 {
+            text.push_str(&format!("line {index}\n\n"));
+        }
+        let mut doc = Document::parse_progressive(&text, 64);
+        assert!(doc.is_parsing());
+        doc.apply_edit(0..0, "typed ");
+        assert!(!doc.is_parsing());
+        assert_matches_full_parse(&doc, "edit during parse");
+    }
+
+
+
+    #[test]
+    fn local_edits_on_a_large_document_match_a_full_parse() {
+        let mut text = String::new();
+        for index in 0..3000 {
+            text.push_str(&format!("# h{index}\n\np{index} text\n\n"));
+        }
+        let mut doc = Document::parse(&text);
+        for step in 0..8 {
+            let len = doc.len_bytes();
+            doc.apply_edit(len..len, "x");
+            assert_matches_full_parse(&doc, &format!("large append {step}"));
+            doc.apply_edit(len..len + 1, "");
+            assert_matches_full_parse(&doc, &format!("large undo {step}"));
+        }
+    }
+
+    #[test]
+    fn random_local_edits_match_a_full_parse() {
+        let seed_text = "alpha **bold** text\n\nsecond paragraph with `code`\n\n- item one\n- item two\n\n```rust\nfn main() {}\n```\n\nlast line\n";
+        let mut doc = Document::parse(seed_text);
+        let alphabet = ["a", "Z", " ", "\n", "#", "-", "*", "`", "~", "中", "> "];
+        let mut state = 0x1234_5678u64;
+        for step in 0..200 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let text = doc.text();
+            if text.is_empty() {
+                doc.apply_edit(0..0, "seed");
+                continue;
+            }
+            let mut offset = ((state >> 16) as usize) % (text.len() + 1);
+            while offset > 0 && !text.is_char_boundary(offset) {
+                offset -= 1;
+            }
+            let insert = alphabet[(state as usize) % alphabet.len()];
+            if step % 3 == 0 && offset < text.len() {
+                let mut end = offset + 1;
+                while end < text.len() && !text.is_char_boundary(end) {
+                    end += 1;
+                }
+                doc.apply_edit(offset..end, "");
+            } else {
+                doc.apply_edit(offset..offset, insert);
+            }
+            assert_matches_full_parse(
+                &doc,
+                &format!("random step {step} offset {offset} insert {insert:?}"),
+            );
+        }
     }
 }

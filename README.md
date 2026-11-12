@@ -66,6 +66,10 @@ and assert their checks. Exit code 0 means every check passed.
 | `--dump-blink` | Caret blink phases, reset and disabled mode |
 | `--dump-completion` | Markdown snippet catalog and no-match boundary |
 | `--dump-settings` | Defaults, validation, save/load and corrupt recovery |
+| `--dump-cache` | Cache root, directory mapping, entry round-trip, checksum and eviction |
+| `--dump-session` | Reading-position store: record, reload, match, clamp and recovery |
+| `--dump-chart` | Bar matrix (grouped, stacked, negative, horizontal, value labels) and the doc examples |
+| `--cache-status` / `--clear-cache` | Report the cache root/size/entries, or empty it |
 
 ## Menu bar
 
@@ -96,7 +100,10 @@ work without a prior click.
   `<s>/<del>`, `<a>` and `<br>`.
 - **Charts**: fenced ```` ```chart ```` blocks render native SVG charts (pie, line,
   bar, scatter) with Matplotlib-style `series: values` and `series.option: value`
-  definitions. See [docs/chart.md](docs/chart.md).
+  definitions. Bar charts support grouped series, category labels (`labels`),
+  value labels (`values`), a zero baseline for negatives, `horizontal` and
+  `stacked`. [docs/chart.md](docs/chart.md) is the interface reference: grammar,
+  every option, axis/legend rules, error messages and the change log.
 - **Automatic TOC**: a standalone `[toc]` line expands to the document's heading
   outline at render time; the marker stays editable when the caret is on it.
 - **Mermaid**: fenced ```` ```mermaid ```` blocks render natively through
@@ -130,7 +137,7 @@ typors.exe --unregister
 ```powershell
 cargo build --release --workspace
 pwsh packaging\build-nsis.ps1
-# -> packaging\dist\typors-1.0.1-setup.exe
+# -> packaging\dist\typors-1.0.2-setup.exe
 ```
 
 The installer's first choice is **install scope**: every user (Program Files +
@@ -143,12 +150,47 @@ chooses. The core files are the only required section, and the Finish page's
 Silent installs must state the scope:
 
 ```powershell
-typors-1.0.1-setup.exe /S /SCOPE=me /D=C:\path\to\typors
-typors-1.0.1-setup.exe /S /SCOPE=all   # triggers UAC
+typors-1.0.2-setup.exe /S /SCOPE=me /D=C:\path\to\typors
+typors-1.0.2-setup.exe /S /SCOPE=all   # triggers UAC
 ```
 
 The old Inno Setup script (`packaging\typors.iss`) is kept only as history; NSIS
 is the supported path.
+
+## Large documents: streaming render
+
+A frame measures the visible band (plus margin) first and paints it, then spends
+a bounded slice (24 blocks / 4 ms) measuring the nearest off-screen blocks into
+the block cache and asks for another frame. Off-screen blocks keep an estimated
+height, so the scrollbar is usable before the rest of the document is measured;
+a block that becomes visible is measured before that frame paints it. Files over
+256 KiB also open progressively: a safe prefix is parsed for the first frame and
+a worker parses the rest, installing the whole-file block table when it arrives.
+
+Edits are local: only the blank-line-separated unit that owns the edit (plus one
+block of lookahead) is reparsed, with the whole-document parse as the fallback
+and the oracle for tests. `TYPORS_EDIT_LOG=1` reports the blocks actually
+reparsed.
+
+## Cache and reading positions
+
+Rendered resources are cached under `<directory containing typors.exe>\cache`
+(images as PNG bitmaps, chart/Mermaid rasters), bounded by
+`files.cache_max_mb` (default 512 MB) with LRU eviction. When the executable
+directory is not writable — an all-users install under Program Files — the cache
+falls back to `%LOCALAPPDATA%\typors\cache`. The index maps each document's
+canonical absolute path to its cache directory; a changed file invalidates only
+its own directory. The cache is always safe to delete.
+
+Each document's caret and scroll position are stored in
+`%APPDATA%\typors\sessions.json` (independent of the cache) and restored when
+the same unchanged file is opened again; a changed file is clamped rather than
+guessed.
+
+```powershell
+typors.exe --cache-status     # root, size, per-document entries
+typors.exe --clear-cache      # remove cached data; documents are untouched
+```
 
 ## Environment variables
 
@@ -161,6 +203,10 @@ All are debug/probe hooks; none is needed to use the editor.
 | `TYPORS_SCROLL=<px>` | Scroll the page to that document offset on the first frame |
 | `TYPORS_CULL_LOG=1` | Print the culling band and shaped/culled fragment counts |
 | `TYPORS_EXIT_DUMP=<ms>` | After that many ms, print buffer + caret and quit |
+| `TYPORS_STREAMING=off` | Disable viewport-first layout (whole-document layout, the pre-change path) |
+| `TYPORS_CACHE=off` | Disable the persistent render cache for this session |
+| `TYPORS_CACHE_DIR=<dir>` | Use this cache root instead of the exe directory/fallback |
+| `TYPORS_SESSIONS_PATH=<file>` | Use this reading-position store instead of `%APPDATA%\typors\sessions.json` |
 
 ## Dependencies
 

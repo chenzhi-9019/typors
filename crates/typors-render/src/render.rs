@@ -151,7 +151,7 @@ impl ShapeCache {
 /// `text` is always a single line (no `\n`): [`DocLayout`] splits on newlines
 /// before it ever measures anything, because `shape_line` debug-asserts on
 /// embedded newlines (`text_system.rs:645-648`).
-pub trait Metrics: fmt::Debug + 'static {
+pub trait Metrics: fmt::Debug + Send + Sync + 'static {
     /// Short label for reports: which implementation produced these numbers.
     fn label(&self) -> &'static str;
     /// Identity of the font this instance measures with, for caches that must
@@ -222,6 +222,14 @@ impl fmt::Debug for WindowMetrics {
         f.write_str("WindowMetrics")
     }
 }
+
+// Background measurement (task 5) moves an `Arc<dyn Metrics>` onto a worker
+// thread. If this assertion ever fails, the scheduler must run its chunks
+// cooperatively on the main thread instead; the public behaviour is the same.
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<WindowMetrics>();
+};
 
 impl WindowMetrics {
     pub fn new(window: &Window, mono_family: SharedString) -> Self {
@@ -651,6 +659,10 @@ pub struct BlockBox {
     /// Atomic images/formulas painted as their own boxes, in the same coordinate
     /// space as `spans`.
     pub objects: Vec<ObjectBox>,
+    /// False for a windowed-layout placeholder: its geometry is an estimate and
+    /// it has no paint commands. A block that is visible in a frame is always
+    /// measured before that frame paints.
+    pub measured: bool,
 }
 
 /// One visual line of a block, exposed for caret and hit testing.
@@ -726,6 +738,16 @@ pub struct DocLayout {
     /// always the complete document.
     pub shaped_fragments: usize,
     pub culled_fragments: usize,
+    /// Slots whose geometry is exact and paintable.
+    pub measured_blocks: usize,
+    /// Slots carrying an estimated height because they are outside the measured
+    /// window (the viewport plus margin).
+    pub estimated_blocks: usize,
+    /// The list ordinal of every block, recorded while the document is walked so
+    /// a later windowed measurement cannot renumber a list.
+    ordinals: Vec<Option<usize>>,
+    /// The window this layout measured, or None for a whole-document layout.
+    pub window: Option<Viewport>,
 }
 
 /// A click that landed on an atomic image/formula.
@@ -1106,6 +1128,39 @@ impl DocLayout {
         media_generation: u64,
         cache: Option<&mut BlockCache>,
     ) -> Self {
+        Self::layout_windowed_media(
+            doc,
+            theme,
+            metrics,
+            origin,
+            width,
+            mode,
+            marked,
+            media,
+            media_generation,
+            cache,
+            None,
+        )
+    }
+
+    /// Whole-document layout, or its viewport-first half: blocks inside the
+    /// window (the visible band plus margin) are measured now, everything else
+    /// keeps an estimated height until the view or the background pass fills it
+    /// in with exact geometry.
+    #[allow(clippy::too_many_arguments)]
+    pub fn layout_windowed_media(
+        doc: &Document,
+        theme: &EditorTheme,
+        metrics: Arc<dyn Metrics>,
+        origin: Point<Pixels>,
+        width: Pixels,
+        mode: LayoutMode,
+        marked: Option<&MarkedText>,
+        media: &dyn MediaMeasures,
+        media_generation: u64,
+        cache: Option<&mut BlockCache>,
+        window: Option<Viewport>,
+    ) -> Self {
         let started = std::time::Instant::now();
         let page_left = px(origin.x.as_f32() + theme.page_pad);
         let page_right =
@@ -1113,6 +1168,9 @@ impl DocLayout {
         let mut y = px(origin.y.as_f32() + theme.page_pad);
         let mut blocks = Vec::with_capacity(doc.blocks().len());
         let mut ordinals: Vec<usize> = Vec::new();
+        let mut ordinal_log: Vec<Option<usize>> = Vec::with_capacity(doc.blocks().len());
+        let mut measured_blocks = 0usize;
+        let mut estimated_blocks = 0usize;
         let mut cache = cache;
         if let Some(cache) = cache.as_deref_mut() {
             cache.prepare(CacheStamp {
@@ -1183,14 +1241,42 @@ impl DocLayout {
                 ordinal,
                 media: media_generation,
             };
-
+            ordinal_log.push(ordinal);
+            let mode_for_block = if source_mode {
+                BlockMode::Source
+            } else {
+                BlockMode::Rendered
+            };
             let cached = match cache.as_deref_mut() {
                 Some(cache) => cache.get(block_idx, &key),
                 None => None,
             };
-            let geometry = match cached {
-                Some(geometry) => geometry,
-                None => {
+            let estimated = estimate_height(theme, block);
+            let in_window = match window {
+                None => true,
+                Some(window) => {
+                    let top_f = top.as_f32();
+                    top_f <= window.bottom && top_f + estimated.max(1.0) >= window.top
+                }
+            };
+            let (boxed, height) = match cached {
+                Some(geometry) => {
+                    let height = geometry.height;
+                    let boxed = if in_window {
+                        geometry.materialize(
+                            block,
+                            block_idx,
+                            top,
+                            mode_for_block,
+                            source_text,
+                            mark_local,
+                        )
+                    } else {
+                        placeholder_block(block, block_idx, top, height, theme, page_left, page_right)
+                    };
+                    (boxed, height)
+                }
+                None if in_window => {
                     let geometry = block_geometry(
                         theme,
                         metrics.as_ref(),
@@ -1203,26 +1289,39 @@ impl DocLayout {
                         ordinal,
                         source_view.as_ref(),
                     );
+                    let height = geometry.height;
                     if let Some(cache) = cache.as_deref_mut() {
                         cache.put(block_idx, key, geometry.clone());
                     }
-                    geometry
+                    (
+                        geometry.materialize(
+                            block,
+                            block_idx,
+                            top,
+                            mode_for_block,
+                            source_text,
+                            mark_local,
+                        ),
+                        height,
+                    )
+                }
+                None => {
+                    let height = px(estimated);
+                    (
+                        placeholder_block(
+                            block, block_idx, top, height, theme, page_left, page_right,
+                        ),
+                        height,
+                    )
                 }
             };
-
-            y = px(top.as_f32() + geometry.height.as_f32());
-            blocks.push(geometry.materialize(
-                block,
-                block_idx,
-                top,
-                if source_mode {
-                    BlockMode::Source
-                } else {
-                    BlockMode::Rendered
-                },
-                source_text,
-                mark_local,
-            ));
+            if boxed.measured {
+                measured_blocks += 1;
+            } else {
+                estimated_blocks += 1;
+            }
+            y = px(top.as_f32() + height.as_f32());
+            blocks.push(boxed);
         }
 
         let height = px((y.as_f32() - origin.y.as_f32() + theme.page_pad).max(theme.page_pad));
@@ -1240,7 +1339,261 @@ impl DocLayout {
             shape_ms: 0.,
             shaped_fragments: 0,
             culled_fragments: 0,
+            measured_blocks,
+            estimated_blocks,
+            ordinals: ordinal_log,
+            window,
         }
+    }
+
+    /// Measure every placeholder that intersects the viewport, then recompute the
+    /// block tops. Returns how many slots were filled in.
+    ///
+    /// The loop repeats because measuring one block changes the top of every
+    /// later block, which can bring another placeholder into the window. It is
+    /// bounded: if the estimates were good the second pass measures nothing.
+    pub fn ensure_measured(
+        &mut self,
+        doc: &Document,
+        media: &dyn MediaMeasures,
+        media_generation: u64,
+        viewport: Viewport,
+        mut cache: Option<&mut BlockCache>,
+    ) -> usize {
+        let mut measured = 0usize;
+        for _pass in 0..8 {
+            let mut changed = false;
+            for block_idx in 0..self.blocks.len() {
+                if self.blocks[block_idx].measured {
+                    continue;
+                }
+                let (top, height) = {
+                    let block = &self.blocks[block_idx];
+                    (block.bounds.origin.y, block.bounds.size.height)
+                };
+                let top_f = top.as_f32();
+                if !viewport.intersects(top_f, top_f + height.as_f32()) {
+                    continue;
+                }
+                if self.measure_slot(doc, media, media_generation, block_idx, cache.as_deref_mut()) {
+                    measured += 1;
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+            self.reflow();
+        }
+        measured
+    }
+
+    /// Measure one placeholder slot in place. Returns false when the index is out
+    /// of range or already measured.
+    fn measure_slot(
+        &mut self,
+        doc: &Document,
+        media: &dyn MediaMeasures,
+        media_generation: u64,
+        block_idx: usize,
+        mut cache: Option<&mut BlockCache>,
+    ) -> bool {
+        if self.blocks.get(block_idx).is_none_or(|block| block.measured) {
+            return false;
+        }
+        let Some(block) = doc.blocks().get(block_idx) else {
+            return false;
+        };
+        let top = self.blocks[block_idx].bounds.origin.y;
+        let page_left = px(self.origin.x.as_f32() + self.theme.page_pad);
+        let page_right = px(
+            (self.origin.x.as_f32() + self.size.width.as_f32() - self.theme.page_pad)
+                .max(page_left.as_f32() + 40.),
+        );
+        let mut mark_local: Option<Range<usize>> = None;
+        let source_text: Option<String> = if self.mode.is_source(block_idx) {
+            let slice = source_slice(doc, &block.src);
+            match self.marked.as_ref().filter(|m| !m.is_empty()) {
+                Some(m) => {
+                    let (spliced, local) = m.splice(&slice, block.src.start);
+                    mark_local = Some(local..local + m.len());
+                    Some(spliced)
+                }
+                None => Some(slice),
+            }
+        } else {
+            None
+        };
+        let key = BlockKey {
+            kind: kind_tag(&block.kind),
+            render: (block.render.as_ptr() as usize, block.render.len()),
+            source: source_text.as_deref().map(|t| (hash_str(t), t.len())),
+            marked: match (&source_text, &mark_local) {
+                (Some(text), Some(range)) => {
+                    let inside = text.get(range.clone()).unwrap_or_default();
+                    Some((range.start, range.end, hash_str(inside)))
+                }
+                _ => None,
+            },
+            ordinal: self.ordinals.get(block_idx).copied().flatten(),
+            media: media_generation,
+        };
+        let cached = match cache.as_deref_mut() {
+            Some(cache) => cache.get(block_idx, &key),
+            None => None,
+        };
+        let geometry = match cached {
+            Some(geometry) => geometry,
+            None => {
+                let source_view = source_text.as_deref().map(|text| SourceView {
+                    text,
+                    marked: mark_local.clone(),
+                });
+                let geometry = block_geometry(
+                    &self.theme,
+                    self.metrics.as_ref(),
+                    media,
+                    block,
+                    block_idx,
+                    page_left,
+                    page_right,
+                    self.origin.x,
+                    self.ordinals.get(block_idx).copied().flatten(),
+                    source_view.as_ref(),
+                );
+                if let Some(cache) = cache.as_deref_mut() {
+                    cache.put(block_idx, key, geometry.clone());
+                }
+                geometry
+            }
+        };
+        let mode = if source_text.is_some() {
+            BlockMode::Source
+        } else {
+            BlockMode::Rendered
+        };
+        self.blocks[block_idx] =
+            geometry.materialize(block, block_idx, top, mode, source_text, mark_local);
+        self.measured_blocks += 1;
+        self.estimated_blocks = self.estimated_blocks.saturating_sub(1);
+        true
+    }
+
+    /// Measure an explicit block range (used when the caret or a click refers to a
+    /// block the viewport window has not reached yet). Reflows once at the end.
+    pub fn ensure_blocks(
+        &mut self,
+        doc: &Document,
+        media: &dyn MediaMeasures,
+        media_generation: u64,
+        range: std::ops::RangeInclusive<usize>,
+        mut cache: Option<&mut BlockCache>,
+    ) -> usize {
+        let last = (*range.end()).min(self.blocks.len().saturating_sub(1));
+        let first = *range.start();
+        let mut measured = 0usize;
+        for block_idx in first..=last {
+            if self.measure_slot(doc, media, media_generation, block_idx, cache.as_deref_mut()) {
+                measured += 1;
+            }
+        }
+        if measured > 0 {
+            self.reflow();
+        }
+        measured
+    }
+
+    /// The list ordinal of one block, as the layout pass assigned it.
+    pub fn ordinal(&self, block_idx: usize) -> Option<usize> {
+        self.ordinals.get(block_idx).copied().flatten()
+    }
+
+    /// Unmeasured block indices ordered by distance from the viewport: the first
+    /// unmeasured block below the band, then the first above, then outward.
+    /// `limit` bounds one frame's background work.
+    pub fn unmeasured_near(&self, viewport: Viewport, limit: usize) -> Vec<usize> {
+        if limit == 0 || self.estimated_blocks == 0 {
+            return Vec::new();
+        }
+        let start = self
+            .blocks
+            .partition_point(|block| block.bounds.origin.y.as_f32() <= viewport.bottom);
+        let mut below = start;
+        let mut above = start;
+        let mut out = Vec::with_capacity(limit);
+        while out.len() < limit && (below < self.blocks.len() || above > 0) {
+            if below < self.blocks.len() {
+                if !self.blocks[below].measured {
+                    out.push(below);
+                    if out.len() == limit {
+                        break;
+                    }
+                }
+                below += 1;
+            }
+            if above > 0 {
+                above -= 1;
+                if !self.blocks[above].measured {
+                    out.push(above);
+                    if out.len() == limit {
+                        break;
+                    }
+                }
+            }
+            if below >= self.blocks.len() && above == 0 {
+                break;
+            }
+        }
+        out
+    }
+
+    /// Fill the block cache for blocks outside the measured window. The current
+    /// layout is not mutated: the next frame re-derives its geometry from the
+    /// cache, so background work is paid once and reused.
+    ///
+    /// Returns how many blocks were measured. Stops early once `budget_ms` has
+    /// elapsed so a frame never overruns because of background work.
+    pub fn measure_background(
+        &mut self,
+        doc: &Document,
+        media: &dyn MediaMeasures,
+        media_generation: u64,
+        indices: &[usize],
+        cache: &mut BlockCache,
+        budget_ms: f64,
+    ) -> usize {
+        let started = std::time::Instant::now();
+        let mut measured = 0usize;
+        for block_idx in indices {
+            if started.elapsed().as_secs_f64() * 1000.0 > budget_ms {
+                break;
+            }
+            // Installing the geometry (not just caching it) is what lets the next
+            // round move past this block and what makes the scrollbar converge.
+            if self.measure_slot(doc, media, media_generation, *block_idx, Some(cache)) {
+                measured += 1;
+            }
+        }
+        if measured > 0 {
+            self.reflow();
+        }
+        measured
+    }
+
+    /// Recompute every block top from the stored heights. O(blocks) additions;
+    /// called only when a measurement changed a height.
+    pub fn reflow(&mut self) {
+        let theme = &self.theme;
+        let mut y = px(self.origin.y.as_f32() + theme.page_pad);
+        for (index, block) in self.blocks.iter_mut().enumerate() {
+            if index > 0 && !matches!(block.kind, BlockKind::Gap) {
+                y = px(y.as_f32() + gap_before(&block.kind, theme));
+            }
+            block.bounds.origin.y = y;
+            y = px(y.as_f32() + block.bounds.size.height.as_f32());
+        }
+        self.size.height =
+            px((y.as_f32() - self.origin.y.as_f32() + theme.page_pad).max(theme.page_pad));
     }
     /// Move the whole layout (used once, from local coordinates into the
     /// element's window bounds before publishing it for hit testing).
@@ -1317,6 +1670,9 @@ impl DocLayout {
     pub fn object_at(&self, p: Point<Pixels>) -> Option<ObjectHit> {
         let block_idx = self.block_at_y(p.y)?;
         let block = self.blocks.get(block_idx)?;
+        if !block.measured {
+            return None;
+        }
         let object = block.objects.iter().find(|object| {
             let bounds = object.bounds;
             p.x >= bounds.left()
@@ -1337,6 +1693,11 @@ impl DocLayout {
     pub fn hit(&self, p: Point<Pixels>) -> Option<RenderHit> {
         let block_idx = self.block_at_y(p.y)?;
         let block = self.blocks.get(block_idx)?;
+        // A placeholder has no fragments to hit. Visible blocks are always
+        // measured, so this only rejects clicks in regions no frame has shown.
+        if !block.measured {
+            return None;
+        }
         let blank_gap = matches!(block.kind, BlockKind::Gap)
             && block.display_text().chars().all(|ch| ch == '\n');
         if block.spans.is_empty() || blank_gap {
@@ -1821,6 +2182,11 @@ impl DocLayout {
 
         let mut a1_bad = Vec::new();
         for block in &self.blocks {
+            // A placeholder is outside the measured window: it paints nothing, so
+            // it has no painted-vs-displayed contract to check.
+            if !block.measured {
+                continue;
+            }
             if doc.blocks().get(block.block_idx).is_none() {
                 a1_bad.push(format!("block {}: missing in document", block.block_idx));
                 continue;
@@ -1842,7 +2208,10 @@ impl DocLayout {
             "A1 painted text == the block's displayed text (newlines stripped)".to_string(),
             a1_bad.is_empty(),
             if a1_bad.is_empty() {
-                format!("{} blocks", self.blocks.len())
+                format!(
+                    "{} measured, {} estimated",
+                    self.measured_blocks, self.estimated_blocks
+                )
             } else {
                 a1_bad.join("; ")
             },
@@ -1856,6 +2225,9 @@ impl DocLayout {
             String::new()
         };
         for block in &self.blocks {
+            if !block.measured {
+                continue;
+            }
             let Some(src) = doc.blocks().get(block.block_idx) else {
                 continue;
             };
@@ -2313,6 +2685,63 @@ fn nearest_boundary(
     }
 }
 
+/// A height guessed from the block kind. Used only for blocks outside the
+/// measured window, so a wrong guess costs scrollbar accuracy, never content:
+/// the block is measured before it is painted. A Gap's guess is exact because
+/// its line count is in its render text.
+fn estimate_height(theme: &EditorTheme, block: &Block) -> f32 {
+    let body = theme.body_size * theme.line_ratio;
+    match &block.kind {
+        BlockKind::Gap => {
+            let lines = block.render.chars().filter(|ch| *ch == '\n').count().max(1);
+            lines as f32 * body
+        }
+        BlockKind::Heading { level } => {
+            let index = (*level as usize).saturating_sub(1).min(theme.heading_scale.len() - 1);
+            body * theme.heading_scale[index].max(1.0) * theme.heading_line_ratio
+                + theme.heading_gap
+        }
+        BlockKind::FencedCode { .. } | BlockKind::IndentedCode => body * 3.0,
+        BlockKind::Table => body * 2.0,
+        BlockKind::Rule => 24.0,
+        _ => body,
+    }
+}
+
+/// A slot with an estimated height and no paint commands. Its render text is
+/// deliberately empty: copying every block's text is the whole-document cost the
+/// windowed layout exists to avoid, and the clipboard/selection read the rope.
+#[allow(clippy::too_many_arguments)]
+fn placeholder_block(
+    block: &Block,
+    block_idx: usize,
+    top: Pixels,
+    height: Pixels,
+    theme: &EditorTheme,
+    page_left: Pixels,
+    page_right: Pixels,
+) -> BlockBox {
+    BlockBox {
+        block_idx,
+        kind: block.kind.clone(),
+        src: block.src.clone(),
+        bounds: Bounds::new(
+            point(page_left, top),
+            size(px((page_right.as_f32() - page_left.as_f32()).max(0.)), height),
+        ),
+        render: String::new(),
+        mode: BlockMode::Rendered,
+        source_text: None,
+        marked: None,
+        content_left: page_left,
+        line_height: px(theme.body_size * theme.line_ratio),
+        spans: Vec::new(),
+        decors: Vec::new(),
+        objects: Vec::new(),
+        measured: false,
+    }
+}
+
 fn gap_before(kind: &BlockKind, theme: &EditorTheme) -> f32 {
     match kind {
         BlockKind::Gap => 0.,
@@ -2425,6 +2854,7 @@ impl BlockGeometry {
             spans,
             decors,
             objects,
+            measured: true,
         }
     }
 }
@@ -3570,6 +4000,152 @@ mod tests {
 
         assert!(Viewport::UNBOUNDED.is_unbounded());
         assert!(Viewport::UNBOUNDED.intersects(f32::MIN, f32::MAX));
+    }
+
+    fn many_paragraphs(count: usize) -> String {
+        (0..count).fold(String::new(), |mut text, index| {
+            text.push_str(&format!("paragraph {index} text\n\n"));
+            text
+        })
+    }
+
+    #[test]
+    fn windowed_layout_measures_the_viewport_first() {
+        let text = many_paragraphs(200);
+        let doc = Document::parse(&text);
+        let theme = EditorTheme::default();
+        let window = Viewport::on_screen(0., 600., 200.);
+        let mut layout = DocLayout::layout_windowed_media(
+            &doc,
+            &theme,
+            Arc::new(ApproxMetrics),
+            point(px(0.), px(0.)),
+            px(600.),
+            LayoutMode::RENDERED,
+            None,
+            &super::NoMedia,
+            0,
+            None,
+            Some(window),
+        );
+        assert!(layout.measured_blocks > 0);
+        assert!(
+            layout.estimated_blocks > 0,
+            "a 200 paragraph document must leave work for the background pass"
+        );
+        assert!(layout.blocks[0].measured);
+        let far = layout.blocks.len() - 2;
+        assert!(!layout.blocks[far].measured);
+        assert!(layout.blocks[far].spans.is_empty());
+        for block in &layout.blocks {
+            let top = block.bounds.origin.y.as_f32();
+            if window.intersects(top, top + block.bounds.size.height.as_f32()) {
+                assert!(
+                    block.measured,
+                    "visible block {} is a placeholder",
+                    block.block_idx
+                );
+            }
+        }
+
+        let measured = layout.ensure_measured(&doc, &super::NoMedia, 0, Viewport::UNBOUNDED, None);
+        assert!(measured > 0);
+        assert_eq!(layout.estimated_blocks, 0);
+        let full = DocLayout::layout_mode(
+            &doc,
+            &theme,
+            Arc::new(ApproxMetrics),
+            point(px(0.), px(0.)),
+            px(600.),
+            LayoutMode::RENDERED,
+        );
+        assert_eq!(
+            super::geometry_fingerprint(&layout),
+            super::geometry_fingerprint(&full),
+            "a fully measured windowed layout must equal the whole-document one"
+        );
+    }
+
+    #[test]
+    fn measuring_keeps_tops_consistent_and_extent_exact() {
+        let text = many_paragraphs(80);
+        let doc = Document::parse(&text);
+        let theme = EditorTheme::default();
+        let window = Viewport::on_screen(0., 400., 100.);
+        let mut layout = DocLayout::layout_windowed_media(
+            &doc,
+            &theme,
+            Arc::new(ApproxMetrics),
+            point(px(0.), px(0.)),
+            px(600.),
+            LayoutMode::RENDERED,
+            None,
+            &super::NoMedia,
+            0,
+            None,
+            Some(window),
+        );
+        layout.ensure_measured(&doc, &super::NoMedia, 0, window, None);
+        // Tops are non-decreasing and the extent reaches past the last block.
+        let mut previous = 0.0;
+        for block in &layout.blocks {
+            let top = block.bounds.origin.y.as_f32();
+            assert!(top >= previous, "block {} moved above its predecessor", block.block_idx);
+            previous = top;
+        }
+        let last = layout.blocks.last().expect("a block");
+        assert!(layout.size.height.as_f32() >= last.bounds.bottom().as_f32());
+        // Measuring the same window again is a no-op.
+        let again = layout.ensure_measured(&doc, &super::NoMedia, 0, window, None);
+        assert_eq!(again, 0);
+    }
+
+    #[test]
+    fn block_cache_carries_measurements_into_the_next_frame() {
+        let text = many_paragraphs(120);
+        let doc = Document::parse(&text);
+        let theme = EditorTheme::default();
+        let mut cache = BlockCache::new();
+        let window = Viewport::on_screen(0., 400., 100.);
+        let mut layout = DocLayout::layout_windowed_media(
+            &doc,
+            &theme,
+            Arc::new(ApproxMetrics),
+            point(px(0.), px(0.)),
+            px(600.),
+            LayoutMode::RENDERED,
+            None,
+            &super::NoMedia,
+            0,
+            Some(&mut cache),
+            Some(window),
+        );
+        let first = layout.measured_blocks;
+        layout.ensure_measured(
+            &doc,
+            &super::NoMedia,
+            0,
+            Viewport::on_screen(0., 2000., 100.),
+            Some(&mut cache),
+        );
+        let second = layout.measured_blocks;
+        assert!(second > first);
+        // The next frame starts with the same cache: what was measured stays
+        // exact, so no block's top moves back to an estimate.
+        let rebuilt = DocLayout::layout_windowed_media(
+            &doc,
+            &theme,
+            Arc::new(ApproxMetrics),
+            point(px(0.), px(0.)),
+            px(600.),
+            LayoutMode::RENDERED,
+            None,
+            &super::NoMedia,
+            0,
+            Some(&mut cache),
+            Some(window),
+        );
+        assert!(rebuilt.measured_blocks >= first);
     }
 
     #[test]

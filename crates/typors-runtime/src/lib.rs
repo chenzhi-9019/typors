@@ -5,8 +5,11 @@
 
 mod app;
 mod associate;
+mod cache_cli;
+mod chart_cli;
 mod file_dialog;
 mod menu;
+mod session_wire;
 mod shell;
 
 /// C entry point called by `typors-app`'s loader.
@@ -49,6 +52,13 @@ pub extern "C" fn typors_run() -> i32 {
                 1
             }
         };
+    }
+
+    if let Some(code) = chart_cli::run_if_requested() {
+        return code;
+    }
+    if let Some(code) = cache_cli::run_if_requested() {
+        return code;
     }
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

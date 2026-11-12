@@ -552,6 +552,15 @@ pub struct MarkdownView {
     scroll_applied: bool,
     /// `TYPORS_CULL_LOG`: print the culling band per frame.
     cull_log: bool,
+    /// Process-wide switches for the streaming pipeline and the persistent
+    /// cache (`TYPORS_STREAMING`, `TYPORS_CACHE`).
+    features: typors_cache::features::Features,
+    /// Receiver for the background whole-file parse of a progressively opened
+    /// document. Applying it is deferred to a frame on the UI thread.
+    parse_rx: Option<std::sync::mpsc::Receiver<Vec<typors_core::doc::Block>>>,
+    /// Probes that compare whole-document layouts can pin streaming off without
+    /// touching the process-wide switch.
+    streaming_override: Option<bool>,
 }
 
 impl MarkdownView {
@@ -601,7 +610,71 @@ impl MarkdownView {
             frame_metrics: None,
             scroll_applied: false,
             cull_log: env_flag("TYPORS_CULL_LOG"),
+            features: typors_cache::features::Features::global(),
+            parse_rx: None,
+            streaming_override: None,
         }
+    }
+
+    /// Pin streaming on or off for controlled comparisons (probes and tests).
+    pub fn set_streaming_override(&mut self, value: Option<bool>) {
+        self.streaming_override = value;
+    }
+
+    /// Finish a progressively opened document on a background thread and hand
+    /// the block table back to the UI. Does nothing once the document is whole.
+    pub fn start_progressive_parse(&mut self, text: String, cx: &mut Context<Self>) {
+        if !self.doc.is_parsing() || !self.streaming_enabled() {
+            return;
+        }
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let blocks = typors_core::doc::Document::parse_blocks_for(&text);
+            let _ = sender.send(blocks);
+        });
+        self.parse_rx = Some(receiver);
+        cx.notify();
+    }
+
+    /// Apply a finished background parse. Returns true when the document grew.
+    /// Called once per frame; while the parse is still running the caller asks
+    /// for another frame so it can land promptly.
+    pub fn poll_progressive_parse(&mut self) -> bool {
+        let Some(receiver) = &self.parse_rx else {
+            return false;
+        };
+        match receiver.try_recv() {
+            Ok(blocks) => {
+                self.parse_rx = None;
+                if self.doc.is_parsing() {
+                    self.doc.finish_progressive(blocks);
+                    self.stale = true;
+                    return true;
+                }
+                false
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.parse_rx = None;
+                false
+            }
+        }
+    }
+
+    /// True while a background parse is still pending (the caller should keep
+    /// requesting frames).
+    pub fn parse_pending(&self) -> bool {
+        self.parse_rx.is_some()
+    }
+
+    /// Whether viewport-first layout with background measurement is enabled.
+    pub fn streaming_enabled(&self) -> bool {
+        self.streaming_override.unwrap_or(self.features.streaming)
+    }
+
+    /// Whether the persistent render cache is enabled.
+    pub fn cache_enabled(&self) -> bool {
+        self.features.cache
     }
 
     pub fn with_dump(doc: Document, sink: DumpSink, cx: &mut Context<Self>) -> Self {
@@ -638,6 +711,11 @@ impl MarkdownView {
     /// Resolve relative image paths against this directory.
     pub fn set_doc_dir(&mut self, dir: Option<PathBuf>) {
         self.media = MediaContext::new(dir);
+    }
+
+    /// Attach the document's disk cache (images, chart/Mermaid rasters).
+    pub fn set_document_cache(&mut self, cache: Option<typors_cache::store::DocumentCache>) {
+        self.media.set_document_cache(cache);
     }
 
     /// A view whose first painted frame also runs the rich-content probe.
@@ -1223,9 +1301,23 @@ impl MarkdownView {
         origin: Point<Pixels>,
         width: Pixels,
     ) -> DocLayout {
+        self.layout_windowed_cached(metrics, origin, width, None)
+    }
+
+    /// Viewport-first layout: blocks inside `window` are measured now, the rest
+    /// keep an estimated height until they scroll in or the background pass
+    /// fills the block cache. `None` measures the whole document (headless
+    /// callers and streaming-disabled runs).
+    pub fn layout_windowed_cached(
+        &mut self,
+        metrics: Arc<dyn Metrics>,
+        origin: Point<Pixels>,
+        width: Pixels,
+        window: Option<Viewport>,
+    ) -> DocLayout {
         let media = &self.media;
         let generation = media.generation();
-        DocLayout::layout_mode_marked_cached_media(
+        DocLayout::layout_windowed_media(
             &self.doc,
             &self.theme,
             metrics,
@@ -1236,7 +1328,56 @@ impl MarkdownView {
             media,
             generation,
             Some(&mut self.block_cache),
+            window,
         )
+    }
+
+    /// Measure every placeholder in `layout` that intersects `viewport`.
+    pub fn ensure_window(&mut self, layout: &mut DocLayout, viewport: Viewport) -> usize {
+        let generation = self.media.generation();
+        layout.ensure_measured(
+            &self.doc,
+            &self.media,
+            generation,
+            viewport,
+            Some(&mut self.block_cache),
+        )
+    }
+
+    /// Fill the block cache for blocks outside the measured window.
+    pub fn background_measure(
+        &mut self,
+        layout: &mut DocLayout,
+        limit: usize,
+        budget_ms: f64,
+    ) -> usize {
+        let band = layout.window.unwrap_or(Viewport::UNBOUNDED);
+        let targets = layout.unmeasured_near(band, limit);
+        if targets.is_empty() {
+            return 0;
+        }
+        let generation = self.media.generation();
+        layout.measure_background(
+            &self.doc,
+            &self.media,
+            generation,
+            &targets,
+            &mut self.block_cache,
+            budget_ms,
+        )
+    }
+
+    /// One frame's share of the background pass: measure the nearest blocks
+    /// outside the window into the block cache. Returns true while work remains,
+    /// so the caller can request another frame.
+    pub fn background_step(&mut self, layout: &mut DocLayout) -> bool {
+        if !self.streaming_enabled() || layout.estimated_blocks == 0 {
+            return false;
+        }
+        if layout.window.is_none() {
+            return false;
+        }
+        self.background_measure(layout, 24, 4.0) > 0
     }
 
     /// One simulated frame at a fixed page width, viewport height and scroll
@@ -1443,10 +1584,69 @@ impl MarkdownView {
         pending.src_for_display_byte(&self.doc, hit.block_idx, hit.render_byte)
     }
 
+    /// Measure the block under a point when it is still a placeholder, so hit
+    /// testing works for a click that arrives before the background pass did.
+    fn ensure_point_measured(&mut self, p: Point<Pixels>) {
+        for _ in 0..3 {
+            let Some(layout) = self.layout.as_ref() else {
+                return;
+            };
+            let Some(block_idx) = layout.block_at_y(p.y) else {
+                return;
+            };
+            if layout.blocks.get(block_idx).is_none_or(|block| block.measured) {
+                return;
+            }
+            let Some(mut layout) = self.layout.take() else {
+                return;
+            };
+            let generation = self.media.generation();
+            layout.ensure_blocks(
+                &self.doc,
+                &self.media,
+                generation,
+                block_idx..=block_idx,
+                Some(&mut self.block_cache),
+            );
+            self.layout = Some(layout);
+        }
+    }
+
+    /// Measure the caret's block (and up to 2000 blocks above it) when it is still
+    /// outside the measured window. Returns true when geometry changed.
+    pub fn ensure_caret_measured(&mut self, layout: &mut DocLayout) -> bool {
+        let Some(caret) = self.caret else {
+            return false;
+        };
+        let Some(block_idx) = self.doc.block_at_src(caret) else {
+            return false;
+        };
+        if layout
+            .blocks
+            .get(block_idx)
+            .is_none_or(|block| block.measured)
+        {
+            return false;
+        }
+        let start = block_idx.saturating_sub(2000);
+        let generation = self.media.generation();
+        layout.ensure_blocks(
+            &self.doc,
+            &self.media,
+            generation,
+            start..=block_idx,
+            Some(&mut self.block_cache),
+        ) > 0
+    }
+
     /// Point the caret at a window point (a mouse click). The press also sets the
     /// selection anchor, so a following drag (or shift-click) has somewhere to
     /// start from.
     pub fn click(&mut self, p: Point<Pixels>) -> Option<usize> {
+        // A click can land on a block the windowed layout has not measured yet
+        // (a probe aims below the fold; a real click lands in the visible band,
+        // which prepaint measured). Measure it, then hit test for real.
+        self.ensure_point_measured(p);
         let src = self.point_to_src(p)?;
         self.caret = Some(src);
         self.anchor = Some(src);
@@ -1894,8 +2094,10 @@ impl MarkdownView {
         let replace_with = normalized.as_ref();
         let start = self.doc.snap_floor(src.start);
         let end = self.doc.snap_ceil(src.end.max(start));
-        let before = self.doc.text();
-        let removed = before.get(start..end).unwrap_or_default().to_string();
+        // Only the removed bytes are copied. A whole-document `text()` here used
+        // to make every keystroke O(document) before the parse even started.
+        let length_before = self.doc.len_bytes();
+        let removed = self.doc.rope().slice(start..end).to_string();
         let caret_before = self.caret;
         self.doc.apply_edit(start..end, replace_with);
         let after = (start + replace_with.len()).min(self.doc.len_bytes());
@@ -1921,13 +2123,14 @@ impl MarkdownView {
         self.last_trigger = Some(trigger);
         if edit_log_enabled() {
             eprintln!(
-                "edit trigger={} src={}..{} insert=\"{}\" buf={}B->{}B caret={:?}->{:?} sel={:?} rev={}",
+                "edit trigger={} src={}..{} insert=\"{}\" buf={}B->{}B reparsed={} blocks caret={:?}->{:?} sel={:?} rev={}",
                 trigger.as_str(),
                 start,
                 end,
                 escape_insert(replace_with),
-                before.len(),
+                length_before,
                 self.doc.len_bytes(),
+                self.doc.last_edit_blocks(),
                 caret_before,
                 self.caret,
                 selection_at_entry,
@@ -3047,9 +3250,42 @@ impl Element for DocElement {
         // (task 7.1, optimisation ①) instead of filling two.
         let metrics = Arc::new(WindowMetrics::with_cache(window, mono_family, cache));
         let (layout, correction) = view.update(cx, |view, cx| {
+            // A progressive open publishes its remaining blocks here, on the UI
+            // thread; while the parse is pending, keep frames coming so it lands.
+            view.poll_progressive_parse();
+            if view.parse_pending() {
+                cx.notify();
+            }
             view.refresh_media(window, cx);
             view.frame_metrics = Some(metrics.clone());
-            let layout = view.layout_now_cached(metrics, point(px(0.), px(0.)), width);
+            // Viewport-first: only the band the frame can show is measured now.
+            // The band is derived from the scroll offset, which the scroll
+            // container has already applied by the time this pass runs.
+            let scroll = view.scroll_offset_y();
+            let streaming = view.streaming_enabled();
+            let band = streaming.then(|| {
+                Viewport::on_screen(
+                    -scroll,
+                    viewport_height,
+                    viewport_height * CULL_MARGIN,
+                )
+            });
+            let mut layout =
+                view.layout_windowed_cached(metrics, point(px(0.), px(0.)), width, band);
+            // A caret parked outside the window (Ctrl+End, a click below the fold)
+            // needs the blocks between it and the window measured before the scroll
+            // decision, or the correction would use estimated positions.
+            view.ensure_caret_measured(&mut layout);
+            if let (Some(caret), true) = (view.caret, band.is_some())
+                && let Some(block_idx) = view.doc.block_at_src(caret)
+                && layout
+                    .blocks
+                    .get(block_idx)
+                    .is_some_and(|block| !block.measured)
+            {
+                // The 2000-block cap left work for the next frame.
+                cx.notify();
+            }
             // Caret scroll-into-view ("回车后光标不跟随"). It has to run here, in the
             // layout pass, for two reasons:
             //
@@ -3061,7 +3297,32 @@ impl Element for DocElement {
             //    therefore lands in this very frame -- no extra frame, no flicker.
             view.apply_scroll_anchor(&layout);
             let correction = view.scroll_for_caret_if_moved(&layout, viewport_height);
+            // The caret correction can move the viewport after the layout was
+            // measured; measure the destination band in the same frame so the
+            // corrected frame never paints a placeholder.
+            if let Some(correction) = &correction
+                && band.is_some()
+            {
+                let target = Viewport::on_screen(
+                    -correction.to,
+                    viewport_height,
+                    viewport_height * CULL_MARGIN,
+                );
+                let generation = view.media.generation();
+                layout.ensure_measured(
+                    &view.doc,
+                    &view.media,
+                    generation,
+                    target,
+                    Some(&mut view.block_cache),
+                );
+            }
             view.record_scroll_anchor(&layout);
+            // Spend a slice of this frame on the nearest unmeasured blocks and
+            // ask for another frame while any remain.
+            if view.background_step(&mut layout) {
+                cx.notify();
+            }
             (layout, correction)
         });
         if let Some(correction) = correction
@@ -3111,6 +3372,23 @@ impl Element for DocElement {
             }
             _ => Viewport::UNBOUNDED,
         };
+        // The paint band is the authority: whatever this frame can show must be
+        // measured before it is shaped. Normally the layout pass already did it;
+        // this covers a scroll that landed after the layout pass (the container
+        // clamps the offset in its own prepaint).
+        let late = self.view.update(cx, |view, _cx| {
+            let generation = view.media.generation();
+            request_layout.ensure_measured(
+                &view.doc,
+                &view.media,
+                generation,
+                viewport,
+                Some(&mut view.block_cache),
+            )
+        });
+        if late > 0 && self.view.read(cx).cull_log {
+            eprintln!("cull: measured {late} late blocks for the paint band");
+        }
         let (mut texts, quads, shaped, culled) = shape_frame(&metrics, request_layout, viewport);
         let (objects, object_texts) = self.view.update(cx, |view, cx| {
             collect_objects(view, request_layout, viewport, metrics.as_ref(), window, cx)

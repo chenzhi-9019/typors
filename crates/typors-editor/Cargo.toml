@@ -9,8 +9,10 @@ description = "typors editor: self-drawn GPUI element, input, IME and selection"
 [dependencies]
 gpui-fps.workspace = true
 gpui-kit.workspace = true
+typors-cache = { path = "../typors-cache" }
 typors-core = { path = "../typors-core" }
 typors-media = { path = "../typors-media" }
 typors-render = { path = "../typors-render" }
 typors-settings = { path = "../typors-settings" }
 libloading = "0.8.9"
+image = { version = "=0.25.10", default-features = false, features = ["png"] }

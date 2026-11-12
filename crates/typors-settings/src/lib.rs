@@ -15,6 +15,7 @@ pub const DEFAULT_FONT_SIZE: f32 = 16.0;
 pub const DEFAULT_LINE_HEIGHT: f32 = 1.6;
 pub const DEFAULT_BLINK_MS: u32 = 530;
 pub const DEFAULT_COMPLETION_DELAY_MS: u32 = 150;
+pub const DEFAULT_CACHE_MAX_MB: u32 = 512;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Settings {
@@ -112,6 +113,13 @@ pub struct Files {
     pub restore_last_session: bool,
     #[serde(default)]
     pub default_save_directory: Option<String>,
+    /// Persist decoded images, chart/Mermaid rasters, math layouts and block
+    /// geometry under the cache root.
+    #[serde(default = "default_true")]
+    pub cache_enabled: bool,
+    /// Upper bound for the whole cache directory tree, in megabytes.
+    #[serde(default = "default_cache_max_mb")]
+    pub cache_max_mb: u32,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -146,8 +154,14 @@ impl Default for Files {
             prompt_on_close: true,
             restore_last_session: false,
             default_save_directory: None,
+            cache_enabled: true,
+            cache_max_mb: DEFAULT_CACHE_MAX_MB,
         }
     }
+}
+
+fn default_cache_max_mb() -> u32 {
+    DEFAULT_CACHE_MAX_MB
 }
 
 fn default_true() -> bool {
@@ -252,6 +266,9 @@ impl Settings {
             && dir.trim().is_empty()
         {
             errors.push(err("default_save_directory", "默认保存目录不能为空"));
+        }
+        if !(64..=8192).contains(&self.files.cache_max_mb) {
+            errors.push(err("cache_max_mb", "缓存上限必须在 64–8192 MB 之间"));
         }
         errors
     }
@@ -443,6 +460,26 @@ mod tests {
         assert_eq!(partial.appearance.font_size, 20.0);
         assert_eq!(partial.appearance.page_width, 860.0);
         assert!(partial.files.prompt_on_close);
+    }
+
+    #[test]
+    fn cache_settings_default_validate_and_load_without_the_field() {
+        let settings = Settings::default();
+        assert!(settings.files.cache_enabled);
+        assert_eq!(settings.files.cache_max_mb, DEFAULT_CACHE_MAX_MB);
+
+        let mut too_small = Settings::default();
+        too_small.files.cache_max_mb = 8;
+        assert!(too_small.validate().iter().any(|e| e.field == "cache_max_mb"));
+        let mut too_large = Settings::default();
+        too_large.files.cache_max_mb = 100_000;
+        assert!(too_large.validate().iter().any(|e| e.field == "cache_max_mb"));
+
+        // An older settings.json has no cache fields at all.
+        let legacy: Settings =
+            serde_json::from_str(r#"{"version":1,"files":{"autosave":"off"}}"#).unwrap();
+        assert!(legacy.files.cache_enabled);
+        assert_eq!(legacy.files.cache_max_mb, DEFAULT_CACHE_MAX_MB);
     }
 
     #[test]

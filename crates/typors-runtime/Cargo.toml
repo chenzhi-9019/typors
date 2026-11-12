@@ -12,8 +12,10 @@ crate-type = ["cdylib"]
 [dependencies]
 gpui-fps.workspace = true
 gpui-kit.workspace = true
+typors-cache = { path = "../typors-cache" }
 typors-core = { path = "../typors-core" }
 typors-editor = { path = "../typors-editor" }
+typors-media = { path = "../typors-media" }
 typors-probes = { path = "../typors-probes" }
 typors-render = { path = "../typors-render" }
 typors-settings = { path = "../typors-settings" }

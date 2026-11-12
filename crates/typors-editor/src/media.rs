@@ -16,8 +16,49 @@ use gpui_kit::gpui::{
     SvgRenderer, SvgSize, Window, px,
 };
 use typors_core::doc::{Document, ObjectKind, SpanKind};
+use typors_cache::store::{DocumentCache, EntryKind, keyed};
 use typors_media::{Chart, ImageRef, MathEngine, MathMetrics, classify};
 use typors_render::{MediaMeasures, ObjectMetrics};
+
+/// Encode a decoded bitmap for the disk cache. `RenderImage::as_bytes` is RGBA on
+/// this GPUI build (verified by the round-trip test below), and PNG keeps the
+/// round trip lossless.
+fn encode_bitmap(image: &RenderImage) -> Option<Vec<u8>> {
+    let size = image.size(0);
+    let (width, height) = (size.width.0, size.height.0);
+    if width <= 0 || height <= 0 {
+        return None;
+    }
+    let bytes = image.as_bytes(0)?;
+    if bytes.len() != width as usize * height as usize * 4 {
+        return None;
+    }
+    let buffer = image::RgbaImage::from_raw(width as u32, height as u32, bytes.to_vec())?;
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(buffer)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .ok()?;
+    Some(png.into_inner())
+}
+
+/// Rebuild a paintable image from a cached PNG.
+fn decode_bitmap(png: &[u8]) -> Option<Arc<RenderImage>> {
+    let decoded = image::load_from_memory(png).ok()?.to_rgba8();
+    let (width, height) = decoded.dimensions();
+    let buffer = image::RgbaImage::from_raw(width, height, decoded.into_raw())?;
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
+}
+
+/// Cached bitmaps above this many pixels are skipped: a 12 MP photo would cost
+/// 48 MB of cache for one picture, and decoding it again is cheaper than that.
+const CACHE_MAX_PIXELS: u64 = 4_000_000;
+
+/// Whether a bitmap of this pixel size is worth caching.
+fn cacheable_pixels(width: i32, height: i32) -> bool {
+    width > 0
+        && height > 0
+        && (width as u64) * (height as u64) <= CACHE_MAX_PIXELS
+}
 
 /// A resolved image, ready to paint.
 #[derive(Clone)]
@@ -59,6 +100,15 @@ pub struct MediaContext {
     chart_images: Mutex<HashMap<(u64, i32, i32), Arc<RenderImage>>>,
     doc_dir: Option<PathBuf>,
     generation: u64,
+    features: typors_cache::features::Features,
+    /// Disk cache for this document, when the cache root is usable.
+    document_cache: Option<DocumentCache>,
+    /// Image destinations resolved from the disk cache, so the layout pass does
+    /// not ask the window for them again and see a pending decode.
+    from_disk: std::collections::HashSet<String>,
+    /// Disk-tier counters for probes: hits, writes and misses.
+    disk_hits: std::cell::Cell<u64>,
+    disk_writes: std::cell::Cell<u64>,
 }
 
 impl Default for MediaContext {
@@ -79,6 +129,105 @@ impl MediaContext {
             chart_images: Mutex::new(HashMap::new()),
             doc_dir,
             generation: 0,
+            features: typors_cache::features::Features::global(),
+            document_cache: None,
+            from_disk: std::collections::HashSet::new(),
+            disk_hits: std::cell::Cell::new(0),
+            disk_writes: std::cell::Cell::new(0),
+        }
+    }
+
+    /// (hits, writes, misses) for the disk tiers.
+    pub fn disk_stats(&self) -> (u64, u64, u64) {
+        let hits = self.disk_hits.get();
+        let writes = self.disk_writes.get();
+        let misses = writes.saturating_sub(hits.min(writes));
+        (hits, writes, misses)
+    }
+
+    /// Whether the persistent render cache is enabled for this session.
+    pub fn cache_enabled(&self) -> bool {
+        self.features.cache
+    }
+
+    /// Attach (or detach) the disk cache for this document.
+    pub fn set_document_cache(&mut self, cache: Option<DocumentCache>) {
+        self.document_cache = cache;
+        self.from_disk.clear();
+    }
+
+    /// Cached raster lookup for a chart/Mermaid source at a device size.
+    fn cached_raster(&self, source: &str, width: i32, height: i32) -> Option<Arc<RenderImage>> {
+        let cache = self.document_cache.as_ref()?;
+        let key = keyed(source.as_bytes(), &[width as u64, height as u64]);
+        let png = cache.read(EntryKind::Raster, &key)?;
+        let image = decode_bitmap(&png)?;
+        self.disk_hits.set(self.disk_hits.get() + 1);
+        Some(image)
+    }
+
+    /// Store a rasterised chart/Mermaid image for the next process.
+    fn store_raster(&self, source: &str, width: i32, height: i32, image: &RenderImage) {
+        let Some(cache) = self.document_cache.as_ref() else {
+            return;
+        };
+        let size = image.size(0);
+        if !cacheable_pixels(size.width.0, size.height.0) {
+            return;
+        }
+        let key = keyed(source.as_bytes(), &[width as u64, height as u64]);
+        if let Some(png) = encode_bitmap(image) {
+            if cache.write(EntryKind::Raster, &key, &png).is_ok() {
+                self.disk_writes.set(self.disk_writes.get() + 1);
+            }
+        }
+    }
+
+    /// Cached decoded bitmap for a local file or data URI, with the logical size
+    /// the layout needs.
+    fn cached_image(&self, destination: &str, window: &Window) -> Option<ImageState> {
+        let cache = self.document_cache.as_ref()?;
+        let (key_bytes, identity) = match classify(destination, self.doc_dir.as_deref()) {
+            ImageRef::Local(path) => (std::fs::read(&path).ok()?, path.to_string_lossy().to_string()),
+            ImageRef::Data { bytes, .. } => (bytes.to_vec(), destination.to_string()),
+            // A remote image's bytes are not available before the fetch, and the
+            // cache deliberately does not store remote responses.
+            _ => return None,
+        };
+        let _ = identity;
+        let key = keyed(&key_bytes, &[]);
+        let png = cache.read(EntryKind::Image, &key)?;
+        let image = decode_bitmap(&png)?;
+        Some(ready_state(image, window))
+    }
+
+    /// Store a freshly decoded bitmap for a local file or data URI.
+    fn store_image(&self, destination: &str) {
+        let Some(cache) = self.document_cache.as_ref() else {
+            return;
+        };
+        let Some(ImageState::Ready {
+            image, width, height,
+        }) = self.images.get(destination)
+        else {
+            return;
+        };
+        let _ = (width, height);
+        let size = image.size(0);
+        if !cacheable_pixels(size.width.0, size.height.0) {
+            return;
+        }
+        let key_bytes = match classify(destination, self.doc_dir.as_deref()) {
+            ImageRef::Local(path) => std::fs::read(&path).ok(),
+            ImageRef::Data { bytes, .. } => Some(bytes.to_vec()),
+            _ => None,
+        };
+        let Some(key_bytes) = key_bytes else {
+            return;
+        };
+        let key = keyed(&key_bytes, &[]);
+        if let Some(png) = encode_bitmap(image) {
+            let _ = cache.write(EntryKind::Image, &key, &png);
         }
     }
 
@@ -134,6 +283,15 @@ impl MediaContext {
         {
             return Some(hit.clone());
         }
+        if let Some(image) = self.cached_raster(source, width, height) {
+            if let Ok(mut cache) = self.diagram_images.lock() {
+                if cache.len() > 32 {
+                    cache.clear();
+                }
+                cache.insert(key, image.clone());
+            }
+            return Some(image);
+        }
         let diagram = self.diagram(source).ok()?;
         let parsed = renderer.parse_svg(diagram.svg.as_bytes()).ok()?;
         let image = renderer
@@ -142,6 +300,7 @@ impl MediaContext {
                 SvgSize::ExactSize(Size::new(DevicePixels(width), DevicePixels(height))),
             )
             .ok()?;
+        self.store_raster(source, width, height, &image);
         if let Ok(mut cache) = self.diagram_images.lock() {
             if cache.len() > 32 {
                 cache.clear();
@@ -184,6 +343,15 @@ impl MediaContext {
         {
             return Some(hit.clone());
         }
+        if let Some(image) = self.cached_raster(source, width, height) {
+            if let Ok(mut cache) = self.chart_images.lock() {
+                if cache.len() > 32 {
+                    cache.clear();
+                }
+                cache.insert(key, image.clone());
+            }
+            return Some(image);
+        }
         let chart = self.chart(source).ok()?;
         let parsed = renderer.parse_svg(chart.svg.as_bytes()).ok()?;
         let image = renderer
@@ -192,6 +360,7 @@ impl MediaContext {
                 SvgSize::ExactSize(Size::new(DevicePixels(width), DevicePixels(height))),
             )
             .ok()?;
+        self.store_raster(source, width, height, &image);
         if let Ok(mut cache) = self.chart_images.lock() {
             if cache.len() > 32 {
                 cache.clear();
@@ -213,6 +382,20 @@ impl MediaContext {
                 let SpanKind::Object(ObjectKind::Image { destination, .. }) = &span.kind else {
                     continue;
                 };
+                // A cached bitmap short-circuits the asset loader entirely; a
+                // destination resolved from disk is not re-measured, or the
+                // pending decode would replace the ready image.
+                if !self.images.contains_key(destination) {
+                    if let Some(state) = self.cached_image(destination, window) {
+                        self.generation = self.generation.saturating_add(1);
+                        self.images.insert(destination.clone(), state);
+                        self.from_disk.insert(destination.clone());
+                        continue;
+                    }
+                }
+                if self.from_disk.contains(destination) {
+                    continue;
+                }
                 let next = measure_image(destination, self.doc_dir.as_deref(), window, cx);
                 let should_replace = match self.images.get(destination) {
                     None => true,
@@ -220,7 +403,11 @@ impl MediaContext {
                 };
                 if should_replace {
                     self.generation = self.generation.saturating_add(1);
+                    let ready = matches!(next, ImageState::Ready { .. });
                     self.images.insert(destination.clone(), next);
+                    if ready {
+                        self.store_image(destination);
+                    }
                 }
             }
         }
@@ -431,3 +618,60 @@ fn ready_state(data: Arc<RenderImage>, window: &Window) -> ImageState {
         height,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oversized_bitmaps_are_not_cacheable() {
+        assert!(cacheable_pixels(100, 100));
+        assert!(cacheable_pixels(2000, 2000));
+        assert!(!cacheable_pixels(2001, 2000));
+        assert!(!cacheable_pixels(0, 10));
+    }
+
+    #[test]
+    fn a_chart_raster_is_reused_from_the_disk_cache() {
+        let temp = std::env::temp_dir().join(format!("typors-media-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let mut store = typors_cache::store::CacheStore::open(&temp).unwrap();
+        let cache = store.register(r"C:mediadoc.md", 1).unwrap();
+        let mut context = MediaContext::new(None);
+        context.set_document_cache(Some(cache));
+        let buffer = image::RgbaImage::from_raw(4, 4, vec![200u8; 4 * 4 * 4]).unwrap();
+        let image = RenderImage::new(vec![image::Frame::new(buffer)]);
+        context.store_raster("pie\n\na: 10%\n", 4, 4, &image);
+        let (hits, writes, _) = context.disk_stats();
+        assert_eq!((hits, writes), (0, 1));
+        let cached = context
+            .cached_raster("pie\n\na: 10%\n", 4, 4)
+            .expect("cached raster");
+        assert_eq!(cached.size(0), image.size(0));
+        assert_eq!(cached.as_bytes(0).unwrap(), image.as_bytes(0).unwrap());
+        assert_eq!(context.disk_stats().0, 1);
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn a_bitmap_round_trips_through_the_cache_encoding() {
+        let buffer = image::RgbaImage::from_raw(
+            2,
+            2,
+            vec![
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 9, 9, 9, 128,
+            ],
+        )
+        .unwrap();
+        let image = Arc::new(RenderImage::new(vec![image::Frame::new(buffer)]));
+        let png = encode_bitmap(&image).expect("encoded");
+        let decoded = decode_bitmap(&png).expect("decoded");
+        assert_eq!(decoded.size(0), image.size(0));
+        assert_eq!(
+            image.as_bytes(0).unwrap(),
+            decoded.as_bytes(0).unwrap(),
+            "pixel bytes must survive the round trip"
+        );
+    }
+}
+
