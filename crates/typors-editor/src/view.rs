@@ -1317,7 +1317,7 @@ impl MarkdownView {
     ) -> DocLayout {
         let media = &self.media;
         let generation = media.generation();
-        DocLayout::layout_windowed_media(
+        let mut layout = DocLayout::layout_windowed_media(
             &self.doc,
             &self.theme,
             metrics,
@@ -1329,7 +1329,10 @@ impl MarkdownView {
             generation,
             Some(&mut self.block_cache),
             window,
-        )
+        );
+        let source_block = layout.mode.source_block;
+        layout.ensure_caret_line(self.caret, source_block);
+        layout
     }
 
     /// Measure every placeholder in `layout` that intersects `viewport`.
@@ -1513,7 +1516,7 @@ impl MarkdownView {
     ) -> DocLayout {
         let media = &self.media;
         let generation = media.generation();
-        DocLayout::layout_mode_marked_cached_media(
+        let mut layout = DocLayout::layout_mode_marked_cached_media(
             &self.doc,
             &self.theme,
             metrics,
@@ -1524,7 +1527,10 @@ impl MarkdownView {
             media,
             generation,
             None,
-        )
+        );
+        let source_block = layout.mode.source_block;
+        layout.ensure_caret_line(self.caret, source_block);
+        layout
     }
 
     /// Lay the document out with `source_block` projected as source, reusing the

@@ -1847,6 +1847,43 @@ pub fn newlines_probe(
         },
     ));
 
+
+    // ---- N7: the caret line after Enter must live inside its block. This is the
+    // first-Enter bug: a paragraph that owns its terminating newline draws only
+    // its non-empty lines, so without the layout's trailing caret line the caret
+    // sits outside the block and the page does not grow until a second newline
+    // creates a gap block.
+    let containment = window
+        .update(|_window, cx| {
+            view.update(cx, |view, _cx| {
+                view.sync_layout();
+                let layout = view.layout()?;
+                let caret = view.caret()?;
+                let (block_idx, byte) = layout.display_byte_for_src(view.doc(), caret)?;
+                let caret_box = layout.caret_bounds(block_idx, byte)?;
+                let block_bottom = layout.blocks.get(block_idx)?.bounds.bottom().as_f32();
+                Some((
+                    caret_box.bottom().as_f32(),
+                    block_bottom,
+                    layout.size.height.as_f32(),
+                ))
+            })
+        })
+        .ok()
+        .flatten();
+    checks.push((
+        "N7 the caret's line box is inside its block after Enter".to_string(),
+        containment.is_some_and(|(caret_bottom, block_bottom, _)| {
+            caret_bottom <= block_bottom + 0.5
+        }),
+        match containment {
+            Some((caret_bottom, block_bottom, page)) => format!(
+                "caret bottom {caret_bottom:.1} vs block bottom {block_bottom:.1}, page {page:.1}"
+            ),
+            None => "no caret/layout".to_string(),
+        },
+    ));
+
     // ---- N2/N3: does the caret follow the text? (「回车后光标不跟随」)
     //
     // These drive the *same* decision the frame runs: `request_layout` calls
